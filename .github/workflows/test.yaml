@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  IMG: localhost/dynamic-crd-watch:test
+
 jobs:
-  test:
+  unit:
+    name: envtest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -16,5 +20,48 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run tests
+      - name: Run tests (embedded apiserver, in-process manager)
         run: make test
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: dynamic-crd-watch
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Load image into kind
+        run: kind load docker-image $IMG --name dynamic-crd-watch
+
+      - name: Deploy controller
+        run: IMG=$IMG make deploy
+
+      - name: Wait for controller readiness
+        run: |
+          kubectl wait --for=condition=available --timeout=120s \
+            deployment/dynamic-watch-poc-controller-manager \
+            -n dynamic-watch-poc-system
+
+      - name: Run e2e tests (real cluster, deployed manager)
+        run: |
+          USE_EXISTING_CLUSTER=true DEPLOYED_MANAGER=true \
+            go test -v -count=1 -timeout 10m ./internal/controller/...

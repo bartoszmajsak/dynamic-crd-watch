@@ -1,0 +1,15 @@
+bin/
+cover.out
+*.out
+.git/
+.github/
+.idea/
+.claude/
+config/
+hack/
+*.md
+Dockerfile
+Makefile*
+.golangci.yml
+.golangci.yaml
+**/*_test.go
