@@ -1,0 +1,5 @@
+#!/bin/sh
+#MISE description="Run integration tests (real cluster, in-process manager)"
+
+USE_EXISTING_CLUSTER=true \
+  go test -v -count=1 -timeout 10m ./internal/controller/...

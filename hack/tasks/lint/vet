@@ -1,0 +1,4 @@
+#!/bin/sh
+#MISE description="Run go vet"
+
+go vet ./...

@@ -1,0 +1,46 @@
+[tools]
+# Keep Go version aligned with go.mod
+go = { version = "1.25", postinstall = "go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.22" }
+"github:golangci/golangci-lint" = "2.11.1"
+"go:sigs.k8s.io/controller-tools/cmd/controller-gen" = "0.20.1"
+kustomize = "5.8.1"
+kubectl = "1.35.2"
+docker-cli = "29.3"
+
+[task_config]
+includes = ["hack/tasks"]
+
+[tasks.build]
+description = "Build manager binary"
+depends = ["generate:*"]
+run = "go build -o bin/manager cmd/main.go"
+
+[tasks.run]
+description = "Run controller from your host"
+depends = ["generate:*"]
+run = "go run ./cmd/main.go"
+
+[tasks."image:push"]
+description = "Push container image to registry"
+run = "{{ env.BUILDER or 'docker' }} push {{ env.IMG or 'localhost:5001/dynamic-crd-watch:test' }}"
+
+[tasks."kind:create"]
+description = "Create a kind cluster with local registry"
+run = "bash hack/kind-with-registry.sh create"
+
+[tasks."kind:delete"]
+description = "Delete the kind cluster"
+run = "bash hack/kind-with-registry.sh delete"
+
+[tasks."crd:install"]
+description = "Install CRDs into the cluster"
+depends = ["generate:manifests"]
+run = "kustomize build config/crd | kubectl apply -f -"
+
+[tasks."crd:uninstall"]
+description = "Uninstall CRDs from the cluster"
+run = "kustomize build config/crd | kubectl delete --ignore-not-found -f -"
+
+[tasks.undeploy]
+description = "Undeploy controller from the cluster"
+run = "kustomize build config/default | kubectl delete --ignore-not-found -f -"

@@ -1,0 +1,9 @@
+#!/bin/sh
+#MISE description="Run golangci-lint"
+
+if [ "${CI:-}" = "true" ]; then
+  echo "Skipping golangci-lint in CI (handled by golangci-lint-action)"
+  exit 0
+fi
+
+golangci-lint run --fix

@@ -101,7 +101,7 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster.
 
 .PHONY: validate-manifests
 validate-manifests: manifests kustomize ## Validate all kustomize manifests.
-	PATH=$(LOCALBIN):$$PATH bash hack/validate-manifests.sh
+	PATH=$(LOCALBIN):$$PATH bash hack/tasks/lint/manifests
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster.

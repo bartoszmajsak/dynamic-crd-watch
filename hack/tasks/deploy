@@ -1,0 +1,9 @@
+#!/bin/sh
+#MISE description="Deploy controller to the cluster"
+#MISE depends=["generate:manifests"]
+
+IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
+
+cd config/manager && kustomize edit set image "controller=$IMG"
+cd - > /dev/null
+kustomize build config/default | kubectl apply -f -

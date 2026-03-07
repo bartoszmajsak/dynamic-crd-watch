@@ -1,0 +1,7 @@
+#!/bin/sh
+#MISE description="Generate CRD and RBAC manifests"
+
+controller-gen rbac:roleName=manager-role crd \
+  paths="./..." \
+  output:crd:artifacts:config=config/crd/bases \
+  output:rbac:artifacts:config=config/rbac

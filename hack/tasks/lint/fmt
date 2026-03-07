@@ -1,0 +1,11 @@
+#!/bin/sh
+#MISE description="Check Go formatting"
+
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "Unformatted files:"
+  echo "$unformatted"
+  echo ""
+  echo "Run: gofmt -s -w ."
+  exit 1
+fi

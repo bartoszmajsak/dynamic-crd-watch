@@ -15,23 +15,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: jdx/mise-action@v3
 
       - name: Run tests (embedded apiserver, in-process manager)
-        run: make test
+        run: mise run test
 
   e2e:
     name: e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: jdx/mise-action@v3
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -53,7 +47,7 @@ jobs:
         run: kind load docker-image $IMG --name dynamic-crd-watch
 
       - name: Deploy controller
-        run: IMG=$IMG make deploy
+        run: IMG=$IMG mise run deploy
 
       - name: Wait for controller readiness
         run: |

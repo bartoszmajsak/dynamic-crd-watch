@@ -1,0 +1,6 @@
+#!/bin/sh
+#MISE description="Run e2e tests (real cluster, deployed manager)"
+#MISE depends=["image:build", "image:push", "deploy"]
+
+USE_EXISTING_CLUSTER=true DEPLOYED_MANAGER=true \
+  go test -v -count=1 -timeout 10m ./internal/controller/...

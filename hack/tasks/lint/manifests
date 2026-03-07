@@ -1,4 +1,6 @@
 #!/bin/bash
+#MISE description="Validate kustomize manifests"
+#MISE depends=["generate:manifests"]
 
 set -euo pipefail
 
@@ -35,20 +37,13 @@ validate_kustomization() {
     fi
 }
 
-validate_all() {
-    local project_root="${1:-$(git rev-parse --show-toplevel)}"
-    local exit_code=0
+project_root="$(git rev-parse --show-toplevel)"
+exit_code=0
 
-    while IFS= read -r -d '' kustomization_file; do
-        if ! validate_kustomization "$kustomization_file" "$project_root"; then
-            exit_code=1
-        fi
-    done < <(find "$project_root" -name "kustomization.yaml" -type f -print0)
+while IFS= read -r -d '' kustomization_file; do
+    if ! validate_kustomization "$kustomization_file" "$project_root"; then
+        exit_code=1
+    fi
+done < <(find "$project_root" -name "kustomization.yaml" -type f -print0)
 
-    return $exit_code
-}
-
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    validate_all "$(git rev-parse --show-toplevel)"
-    exit $?
-fi
+exit $exit_code

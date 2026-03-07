@@ -1,0 +1,4 @@
+#!/bin/sh
+#MISE description="Generate DeepCopy methods"
+
+controller-gen object paths="./..."
