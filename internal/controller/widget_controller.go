@@ -7,10 +7,12 @@ import (
 	"sync"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -36,11 +38,20 @@ const (
 	pluginRefField      = "spec.pluginRef"
 )
 
+type watchState int
+
+const (
+	watchNotAvailable  watchState = iota
+	watchAlreadyActive
+	watchJustRegistered
+)
+
 // WidgetReconciler reconciles a Widget object.
 type WidgetReconciler struct {
 	client.Client
 
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	recorder record.EventRecorder
 
 	// Fields for dynamic watch management.
 	ctrl              controller.Controller
@@ -55,6 +66,7 @@ type WidgetReconciler struct {
 // +kubebuilder:rbac:groups=demo.example.com,resources=widgets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=demo.example.com,resources=pluginconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -76,7 +88,11 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	if !r.ensurePluginWatch(ctx) {
+	switch r.ensurePluginWatch(ctx) {
+	case watchJustRegistered:
+		r.recorder.Event(widget, corev1.EventTypeNormal, "PluginWatchRegistered",
+			"Dynamic watch for PluginConfig CRD activated")
+	case watchNotAvailable:
 		meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
 			Type:               ConditionPluginReady,
 			Status:             metav1.ConditionFalse,
@@ -86,6 +102,8 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		})
 
 		return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
+	case watchAlreadyActive:
+		// Watch already running, proceed to read PluginConfig.
 	}
 
 	// CRD is available — try to read the referenced PluginConfig.
@@ -97,6 +115,9 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// reset the watch state and requeue so the next reconcile detects CRD absence properly.
 		var notCached *cache.ErrResourceNotCached
 		if errors.As(err, &notCached) {
+			r.recorder.Event(widget, corev1.EventTypeWarning, "PluginCacheInvalidated",
+				"PluginConfig informer was removed during reconciliation; requeuing")
+
 			r.mu.Lock()
 			r.pluginWatchActive = false
 			r.mu.Unlock()
@@ -106,6 +127,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced PluginConfig not found", "pluginRef", widget.Spec.PluginRef)
+
 			meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
 				Type:               ConditionPluginReady,
 				Status:             metav1.ConditionFalse,
@@ -133,21 +155,21 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 // ensurePluginWatch checks if the PluginConfig CRD is available and registers
-// a dynamic watch if it is. Returns true if the watch is active.
+// a dynamic watch if it is.
 //
 // Uses a check-lock-check pattern to avoid holding the mutex during
 // the network call to the discovery API.
-func (r *WidgetReconciler) ensurePluginWatch(ctx context.Context) bool {
+func (r *WidgetReconciler) ensurePluginWatch(ctx context.Context) watchState {
 	r.mu.Lock()
 	if r.pluginWatchActive {
 		r.mu.Unlock()
 
-		return true
+		return watchAlreadyActive
 	}
 	r.mu.Unlock()
 
 	if !r.isCRDAvailable(ctx) {
-		return false
+		return watchNotAvailable
 	}
 
 	r.mu.Lock()
@@ -155,7 +177,7 @@ func (r *WidgetReconciler) ensurePluginWatch(ctx context.Context) bool {
 
 	// Double-check: another goroutine may have registered while we were checking discovery.
 	if r.pluginWatchActive {
-		return true
+		return watchAlreadyActive
 	}
 
 	log := logf.FromContext(ctx)
@@ -173,13 +195,13 @@ func (r *WidgetReconciler) ensurePluginWatch(ctx context.Context) bool {
 	if err := r.ctrl.Watch(src); err != nil {
 		log.Error(err, "Failed to register PluginConfig watch")
 
-		return false
+		return watchNotAvailable
 	}
 
 	r.pluginWatchActive = true
 	log.Info("Dynamically registered watch for PluginConfig")
 
-	return true
+	return watchJustRegistered
 }
 
 // isCRDAvailable checks the discovery API to determine if the PluginConfig
@@ -292,6 +314,7 @@ func (r *WidgetReconciler) allWidgetsWithPluginRef(ctx context.Context) []reconc
 // SetupWithManager sets up the controller with the Manager.
 func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.cache = mgr.GetCache()
+	r.recorder = mgr.GetEventRecorderFor("widget-controller")
 
 	dc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
