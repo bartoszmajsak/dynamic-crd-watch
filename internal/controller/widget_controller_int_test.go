@@ -31,7 +31,6 @@ var _ = Describe("Widget Controller", func() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
 			})
 
-			// Wait for the widget to appear in cache first.
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 			}).WithContext(ctx).Should(Succeed())
@@ -77,6 +76,7 @@ var _ = Describe("Widget Controller", func() {
 			}
 
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
+
 			Eventually(func(g Gomega, ctx context.Context) {
 				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
 				g.Expect(err).To(HaveOccurred(), "CRD should be deleted")

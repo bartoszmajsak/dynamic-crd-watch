@@ -26,6 +26,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// managerNamespace must match kustomize output (config/default/kustomization.yaml).
+const managerNamespace = "dynamic-watch-poc-system"
+
 var (
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -33,15 +36,36 @@ var (
 	cfg       *rest.Config
 	k8sClient client.Client
 
+	deployedManager bool
+
 	// Path to the PluginConfig CRD YAML — used to install/remove it dynamically in tests.
 	pluginConfigCRDPath string
 )
 
+// Three test modes, controlled by environment variables:
+//
+//   - envtest (default): embedded apiserver + in-process manager.
+//     Fast, no cluster required. Run with: make test
+//
+//   - USE_EXISTING_CLUSTER: real cluster apiserver + in-process manager.
+//     Tests real CRD lifecycle, etcd behaviour, admission webhooks.
+//     Run with: make test-int (requires: make kind-create)
+//
+//   - USE_EXISTING_CLUSTER + DEPLOYED_MANAGER: real cluster + deployed manager pod.
+//     Full e2e: validates container image, kustomize manifests, RBAC.
+//     Run with: make test-e2e (requires: make kind-create)
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
 
-	SetDefaultEventuallyTimeout(10 * time.Second)
-	SetDefaultEventuallyPollingInterval(250 * time.Millisecond)
+	if os.Getenv("USE_EXISTING_CLUSTER") != "" {
+		deployedManager = os.Getenv("DEPLOYED_MANAGER") != ""
+
+		SetDefaultEventuallyTimeout(30 * time.Second)
+		SetDefaultEventuallyPollingInterval(500 * time.Millisecond)
+	} else {
+		SetDefaultEventuallyTimeout(10 * time.Second)
+		SetDefaultEventuallyPollingInterval(250 * time.Millisecond)
+	}
 
 	RunSpecs(t, "Controller Suite")
 }
@@ -55,8 +79,74 @@ var _ = BeforeSuite(func() {
 	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	root := fixture.ProjectRoot()
-
 	pluginConfigCRDPath = filepath.Join(root, "config", "crd", "bases", "demo.example.com_pluginconfigs.yaml")
+
+	switch {
+	case deployedManager:
+		setupDeployedManager()
+	case os.Getenv("USE_EXISTING_CLUSTER") != "":
+		setupExistingCluster(root)
+	default:
+		setupEnvtest(root)
+	}
+})
+
+var _ = AfterEach(func() {
+	if deployedManager && CurrentSpecReport().Failed() {
+		collectKubeDiagnostics(ctx)
+	}
+})
+
+var _ = AfterSuite(func() {
+	By("tearing down the test environment")
+	cancel()
+
+	if testEnv != nil {
+		Eventually(func() error {
+			return testEnv.Stop()
+		}, time.Minute, time.Second).Should(Succeed())
+	}
+})
+
+// setupDeployedManager connects to an existing cluster where the manager
+// is already running as a pod (docker-build → docker-push → deploy).
+func setupDeployedManager() {
+	By("connecting to cluster from kubeconfig (deployed manager)")
+	cfg = ctrl.GetConfigOrDie()
+
+	var err error
+	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	Expect(err).NotTo(HaveOccurred())
+
+	By("verifying manager deployment is ready")
+	waitForManagerReady(ctx)
+}
+
+// setupExistingCluster connects to a real cluster via kubeconfig and starts
+// the manager in-process. This exercises real CRD lifecycle and etcd behaviour
+// without requiring docker build or pod deployment.
+func setupExistingCluster(root string) {
+	By("connecting to cluster from kubeconfig (in-process manager)")
+	useExisting := true
+	testEnv = &envtest.Environment{
+		UseExistingCluster: &useExisting,
+		// Only install Widget CRD at startup. PluginConfig CRD is installed dynamically in tests.
+		CRDInstallOptions: envtest.CRDInstallOptions{
+			Paths:              []string{filepath.Join(root, "config", "crd", "bases", "demo.example.com_widgets.yaml")},
+			ErrorIfPathMissing: true,
+		},
+	}
+
+	var err error
+	cfg, err = testEnv.Start()
+	Expect(err).NotTo(HaveOccurred())
+	Expect(cfg).NotTo(BeNil())
+
+	startInProcessManager()
+}
+
+// setupEnvtest starts an embedded apiserver via envtest and runs the manager in-process.
+func setupEnvtest(root string) {
 	_, err := os.Stat(pluginConfigCRDPath)
 	Expect(err).NotTo(HaveOccurred(), "PluginConfig CRD YAML must exist — run 'make manifests'")
 
@@ -77,6 +167,10 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
+	startInProcessManager()
+}
+
+func startInProcessManager() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
 		Cache: cache.Options{
@@ -103,15 +197,7 @@ var _ = BeforeSuite(func() {
 	}()
 
 	k8sClient = mgr.GetClient()
-})
-
-var _ = AfterSuite(func() {
-	By("tearing down the test environment")
-	cancel()
-	Eventually(func() error {
-		return testEnv.Stop()
-	}, time.Minute, time.Second).Should(Succeed())
-})
+}
 
 // firstEnvTestBinaryDir finds envtest binaries for IDE-based test runs
 // where KUBEBUILDER_ASSETS is not set via Makefile.
