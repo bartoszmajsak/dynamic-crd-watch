@@ -31,6 +31,13 @@ func WithPluginRef(ref string) WidgetOption {
 	}
 }
 
+// WithThemeRef sets the themeRef field on the Widget spec.
+func WithThemeRef(ref string) WidgetOption {
+	return func(w *demov1alpha1.Widget) {
+		w.Spec.ThemeRef = ref
+	}
+}
+
 // PluginConfig creates a PluginConfig resource with the given name, namespace, and setting.
 func PluginConfig(name, namespace, setting string) *demov1alpha1.PluginConfig {
 	return &demov1alpha1.PluginConfig{
@@ -40,6 +47,19 @@ func PluginConfig(name, namespace, setting string) *demov1alpha1.PluginConfig {
 		},
 		Spec: demov1alpha1.PluginConfigSpec{
 			Setting: setting,
+		},
+	}
+}
+
+// Theme creates a Theme resource with the given name, namespace, and color scheme.
+func Theme(name, namespace, colorScheme string) *demov1alpha1.Theme {
+	return &demov1alpha1.Theme{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: demov1alpha1.ThemeSpec{
+			ColorScheme: colorScheme,
 		},
 	}
 }

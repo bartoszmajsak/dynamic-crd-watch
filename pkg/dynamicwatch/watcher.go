@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -148,15 +148,34 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		return nil, fmt.Errorf("deriving GVK for %s: %w", b.crdName, err)
 	}
 
-	dc, err := discovery.NewDiscoveryClientForConfig(b.mgr.GetConfig())
+	dc, err := discovery.NewDiscoveryClientForConfigAndClient(b.mgr.GetConfig(), b.mgr.GetHTTPClient())
 	if err != nil {
 		return nil, fmt.Errorf("creating discovery client for %s: %w", b.crdName, err)
+	}
+
+	crdCache, err := cache.New(b.mgr.GetConfig(), cache.Options{
+		HTTPClient: b.mgr.GetHTTPClient(),
+		Scheme:     b.mgr.GetScheme(),
+		Mapper:     b.mgr.GetRESTMapper(),
+		ByObject: map[client.Object]cache.ByObject{
+			&apiextensionsv1.CustomResourceDefinition{}: {
+				Field: fields.OneTermEqualSelector("metadata.name", b.crdName),
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating CRD cache for %s: %w", b.crdName, err)
+	}
+
+	if err := b.mgr.Add(crdCache); err != nil {
+		return nil, fmt.Errorf("registering CRD cache for %s: %w", b.crdName, err)
 	}
 
 	w := &Watcher[T]{
 		crdName:      b.crdName,
 		gvk:          gvk,
 		cache:        b.mgr.GetCache(),
+		crdCache:     crdCache,
 		objectMapper: b.objectMapper,
 		requeueAll:   b.requeueAll,
 		newT:         newT,
@@ -174,6 +193,7 @@ type Watcher[T client.Object] struct {
 	crdName      string
 	gvk          schema.GroupVersionKind
 	cache        cache.Cache
+	crdCache     cache.Cache
 	ctrl         WatchRegistrar
 	crdAvailable func(ctx context.Context) bool
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
@@ -183,14 +203,15 @@ type Watcher[T client.Object] struct {
 	active       bool
 }
 
-// Register adds a CRD watch to the controller builder. This watch detects
-// when the target CRD is installed or removed and triggers the appropriate
-// lifecycle handling. Must be called before [builder.Builder.Build].
+// Register adds a CRD watch to the controller builder using the watcher's
+// dedicated cache. Each Watcher gets its own cache filtered by metadata.name
+// via a server-side field selector, so multiple Watchers can independently
+// track different CRDs without interfering with each other.
+// Must be called before [builder.Builder.Build].
 func (w *Watcher[T]) Register(b *builder.Builder) {
-	b.Watches(&apiextensionsv1.CustomResourceDefinition{},
-		handler.EnqueueRequestsFromMapFunc(w.onCRDChange),
-		builder.WithPredicates(w.crdPredicate()),
-	)
+	b.WatchesRawSource(source.Kind(w.crdCache, &apiextensionsv1.CustomResourceDefinition{},
+		handler.TypedEnqueueRequestsFromMapFunc(w.onCRDChange),
+	))
 }
 
 // Bind connects the watcher to the built controller, enabling dynamic
@@ -324,13 +345,8 @@ func (w *Watcher[T]) Available() bool {
 // Established=False) before setting DeletionTimestamp. Without this
 // check, status update events would trigger spurious watch
 // re-registration that deadlocks on WaitForCacheSync.
-func (w *Watcher[T]) onCRDChange(ctx context.Context, obj client.Object) []reconcile.Request {
+func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) []reconcile.Request {
 	log := logf.FromContext(ctx)
-
-	crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
-	if !ok {
-		return nil
-	}
 
 	crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 	if crdRemoved {
@@ -357,12 +373,6 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, obj client.Object) []recon
 	}
 
 	return w.requeueAll(ctx)
-}
-
-func (w *Watcher[T]) crdPredicate() predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		return obj.GetName() == w.crdName
-	})
 }
 
 // crdChecker returns a function that checks CRD availability via the

@@ -47,6 +47,14 @@ spec:
                   the Widget will report PluginReady=False.
                 minLength: 1
                 type: string
+              themeRef:
+                description: |-
+                  themeRef is an optional reference to a Theme resource name.
+                  When set, the controller will attempt to read the referenced Theme
+                  and apply its color scheme. If the Theme CRD is not installed,
+                  the Widget will report ThemeReady=False.
+                minLength: 1
+                type: string
             type: object
           status:
             description: WidgetStatus defines the observed state of Widget.

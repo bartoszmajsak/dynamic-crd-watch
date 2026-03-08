@@ -36,10 +36,16 @@ var (
 	cfg       *rest.Config
 	k8sClient client.Client
 
+	// directClient bypasses the manager's cache. Required for CRD operations
+	// because CRD informers live in each Watcher's dedicated cache, not the
+	// manager's main cache (which has ReaderFailOnMissingInformer: true).
+	directClient client.Client
+
 	deployedManager bool
 
-	// Path to the PluginConfig CRD YAML — used to install/remove it dynamically in tests.
+	// Paths to optional CRD YAMLs — used to install/remove them dynamically in tests.
 	pluginConfigCRDPath string
+	themeCRDPath        string
 )
 
 // Three test modes, controlled by environment variables:
@@ -80,6 +86,7 @@ var _ = BeforeSuite(func() {
 
 	root := fixture.ProjectRoot()
 	pluginConfigCRDPath = filepath.Join(root, "config", "crd", "bases", "demo.example.com_pluginconfigs.yaml")
+	themeCRDPath = filepath.Join(root, "config", "crd", "bases", "demo.example.com_themes.yaml")
 
 	switch {
 	case deployedManager:
@@ -91,8 +98,10 @@ var _ = BeforeSuite(func() {
 	}
 })
 
-var _ = AfterEach(func() {
-	if deployedManager && CurrentSpecReport().Failed() {
+// ReportAfterEach runs even on interrupt/timeout (unlike AfterEach),
+// ensuring diagnostics are collected when tests hang or get Ctrl+C'd.
+var _ = ReportAfterEach(func(report SpecReport) {
+	if deployedManager && report.Failed() {
 		collectKubeDiagnostics(ctx)
 	}
 })
@@ -117,6 +126,7 @@ func setupDeployedManager() {
 	var err error
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
+	directClient = k8sClient // no manager cache in deployed mode
 
 	By("verifying manager deployment is ready")
 	waitForManagerReady(ctx)
@@ -149,6 +159,8 @@ func setupExistingCluster(root string) {
 func setupEnvtest(root string) {
 	_, err := os.Stat(pluginConfigCRDPath)
 	Expect(err).NotTo(HaveOccurred(), "PluginConfig CRD YAML must exist — run 'make manifests'")
+	_, err = os.Stat(themeCRDPath)
+	Expect(err).NotTo(HaveOccurred(), "Theme CRD YAML must exist — run 'make manifests'")
 
 	By("bootstrapping test environment with Widget CRD only")
 	testEnv = &envtest.Environment{
@@ -197,6 +209,10 @@ func startInProcessManager() {
 	}()
 
 	k8sClient = mgr.GetClient()
+
+	var err2 error
+	directClient, err2 = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	Expect(err2).NotTo(HaveOccurred())
 }
 
 // firstEnvTestBinaryDir finds envtest binaries for IDE-based test runs

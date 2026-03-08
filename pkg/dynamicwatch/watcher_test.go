@@ -11,16 +11,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/bartoszmajsak/dynamic-watch-poc/pkg/dynamicwatch"
 )
-
-func genericEvent(obj client.Object) event.GenericEvent {
-	return event.GenericEvent{Object: obj}
-}
 
 // fakeController implements dynamicwatch.WatchRegistrar - the only
 // interface the Watcher needs from a controller.
@@ -374,46 +369,6 @@ func TestSimulateCRDChange_WatchNotActive_SkipsRemovalAndRequeue(t *testing.T) {
 	}
 }
 
-func TestSimulateCRDChange_NonCRDObject_Ignored(t *testing.T) {
-	requeueCalled := false
-	w := newTestWatcher(&fakeCache{}, &fakeController{})
-	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
-		requeueCalled = true
-
-		return nil
-	})
-
-	requests := dynamicwatch.SimulateCRDChange(w, t.Context(), &corev1.ConfigMap{})
-
-	if requeueCalled {
-		t.Error("expected requeueAll not to be called for non-CRD object")
-	}
-
-	if requests != nil {
-		t.Errorf("expected nil requests for non-CRD object, got %v", requests)
-	}
-}
-
-func TestCRDPredicate_FiltersByName(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, &fakeController{})
-	p := dynamicwatch.CRDPredicate(w)
-
-	matching := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
-	}
-	other := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: "other.test.io"},
-	}
-
-	if !p.Generic(genericEvent(matching)) {
-		t.Error("expected predicate to match CRD with correct name")
-	}
-
-	if p.Generic(genericEvent(other)) {
-		t.Error("expected predicate to reject CRD with different name")
-	}
-}
-
 func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 	fc := &fakeController{}
 	w := newTestWatcher(&fakeCache{}, fc)
@@ -421,11 +376,9 @@ func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			w.Ensure(t.Context())
-		}()
+		})
 	}
 	wg.Wait()
 

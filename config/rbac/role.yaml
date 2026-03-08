@@ -16,6 +16,7 @@ rules:
   - demo.example.com
   resources:
   - pluginconfigs
+  - themes
   - widgets
   verbs:
   - get

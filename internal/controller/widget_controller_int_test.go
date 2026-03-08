@@ -22,12 +22,15 @@ var _ = Describe("Widget Controller", func() {
 
 	const namespace = "default"
 
-	installPluginConfigCRD := func(ctx context.Context) *apiextensionsv1.CustomResourceDefinition {
-		crd := loadCRDFromFile(pluginConfigCRDPath)
-		Expect(k8sClient.Create(ctx, crd)).To(Succeed())
+	// CRD install/remove helpers use directClient (uncached) because the manager's
+	// cache has ReaderFailOnMissingInformer: true and CRD informers live only in
+	// each Watcher's dedicated cache, not the main cache.
+	installCRD := func(ctx context.Context, path string) *apiextensionsv1.CustomResourceDefinition {
+		crd := loadCRDFromFile(path)
+		Expect(directClient.Create(ctx, crd)).To(Succeed())
 
 		Eventually(func(g Gomega, ctx context.Context) {
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)).To(Succeed())
+			g.Expect(directClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)).To(Succeed())
 			established := false
 			for _, c := range crd.Status.Conditions {
 				if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
@@ -40,13 +43,23 @@ var _ = Describe("Widget Controller", func() {
 		return crd
 	}
 
-	removePluginConfigCRD := func(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) {
-		Expect(k8sClient.Delete(ctx, crd)).To(Succeed())
+	removeCRD := func(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) {
+		Expect(directClient.Delete(ctx, crd)).To(Succeed())
 
 		Eventually(func(g Gomega, ctx context.Context) {
-			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)
+			err := directClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)
 			g.Expect(err).To(HaveOccurred())
 		}).WithContext(ctx).Should(Succeed())
+	}
+
+	deferCRDCleanup := func(crd *apiextensionsv1.CustomResourceDefinition) {
+		DeferCleanup(func(ctx SpecContext) {
+			_ = client.IgnoreNotFound(directClient.Delete(ctx, crd))
+			Eventually(func(g Gomega, ctx context.Context) {
+				err := directClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
+				g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
+			}).WithContext(ctx).Should(Succeed())
+		})
 	}
 
 	Context("without pluginRef", func() {
@@ -82,6 +95,7 @@ var _ = Describe("Widget Controller", func() {
 
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.ObservedGeneration).To(Equal(widget.Generation))
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
 						demov1alpha1.ConditionPluginReady,
@@ -115,14 +129,8 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("installing PluginConfig CRD at runtime")
-			crd := installPluginConfigCRD(ctx)
-			DeferCleanup(func(ctx SpecContext) {
-				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
-				Eventually(func(g Gomega, ctx context.Context) {
-					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
-					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
-				}).WithContext(ctx).Should(Succeed())
-			})
+			crd := installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(crd)
 
 			By("creating the referenced PluginConfig")
 			plugin := fixture.PluginConfig("my-plugin", namespace, "hello-from-plugin")
@@ -134,6 +142,7 @@ var _ = Describe("Widget Controller", func() {
 			By("eventually transitioning to PluginReady=True")
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.ObservedGeneration).To(Equal(widget.Generation))
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
 						demov1alpha1.ConditionPluginReady,
@@ -152,7 +161,7 @@ var _ = Describe("Widget Controller", func() {
 			})
 
 			By("installing CRD and creating PluginConfig")
-			crd := installPluginConfigCRD(ctx)
+			crd := installCRD(ctx, pluginConfigCRDPath)
 
 			plugin := fixture.PluginConfig("removal-plugin", namespace, "will-be-removed")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -166,7 +175,7 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("removing the PluginConfig CRD")
-			removePluginConfigCRD(ctx, crd)
+			removeCRD(ctx, crd)
 
 			By("eventually transitioning back to PluginCRDNotAvailable")
 			Eventually(func(g Gomega, ctx context.Context) {
@@ -183,14 +192,8 @@ var _ = Describe("Widget Controller", func() {
 
 		It("should set PluginNotFound when CRD exists but referenced PluginConfig does not", func(ctx SpecContext) {
 			By("installing PluginConfig CRD")
-			crd := installPluginConfigCRD(ctx)
-			DeferCleanup(func(ctx SpecContext) {
-				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
-				Eventually(func(g Gomega, ctx context.Context) {
-					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
-					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
-				}).WithContext(ctx).Should(Succeed())
-			})
+			crd := installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(crd)
 
 			widget := fixture.Widget("missing-plugin", namespace, fixture.WithPluginRef("nonexistent"))
 			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
@@ -213,14 +216,8 @@ var _ = Describe("Widget Controller", func() {
 
 		It("should update Widget condition when PluginConfig setting changes", func(ctx SpecContext) {
 			By("installing PluginConfig CRD")
-			crd := installPluginConfigCRD(ctx)
-			DeferCleanup(func(ctx SpecContext) {
-				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
-				Eventually(func(g Gomega, ctx context.Context) {
-					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
-					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
-				}).WithContext(ctx).Should(Succeed())
-			})
+			crd := installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(crd)
 
 			plugin := fixture.PluginConfig("update-test", namespace, "original-setting")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -277,7 +274,7 @@ var _ = Describe("Widget Controller", func() {
 			})
 
 			By("step 1: install CRD, create plugin - should become ready")
-			crd := installPluginConfigCRD(ctx)
+			crd := installCRD(ctx, pluginConfigCRDPath)
 
 			plugin := fixture.PluginConfig("cycle-plugin", namespace, "first-install")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -290,7 +287,7 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("step 2: remove CRD - should become not available")
-			removePluginConfigCRD(ctx, crd)
+			removeCRD(ctx, crd)
 
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
@@ -304,14 +301,8 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("step 3: re-install CRD, create plugin again - should become ready again")
-			crd = installPluginConfigCRD(ctx)
-			DeferCleanup(func(ctx SpecContext) {
-				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
-				Eventually(func(g Gomega, ctx context.Context) {
-					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
-					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
-				}).WithContext(ctx).Should(Succeed())
-			})
+			crd = installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(crd)
 
 			plugin = fixture.PluginConfig("cycle-plugin", namespace, "second-install")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -403,6 +394,219 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 		})
 	})
+
+	Context("Theme CRD lifecycle", func() {
+
+		It("should set ThemeReady=False when themeRef set but Theme CRD not installed", func(ctx SpecContext) {
+			widget := fixture.Widget("wants-theme", namespace, fixture.WithThemeRef("my-theme"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+
+		It("should set ThemeNotFound when CRD exists but referenced Theme does not", func(ctx SpecContext) {
+			By("installing Theme CRD")
+			crd := installCRD(ctx, themeCRDPath)
+			deferCRDCleanup(crd)
+
+			widget := fixture.Widget("missing-theme", namespace, fixture.WithThemeRef("nonexistent"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("expecting ThemeReady=False with reason ThemeNotFound")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.ObservedGeneration).To(Equal(widget.Generation))
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeNotFound,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+
+		It("should set ThemeReady=True when Theme CRD installed and Theme exists", func(ctx SpecContext) {
+			widget := fixture.Widget("theme-ready", namespace, fixture.WithThemeRef("dark"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("initially reporting ThemeCRDNotAvailable")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+
+			By("installing Theme CRD")
+			crd := installCRD(ctx, themeCRDPath)
+			deferCRDCleanup(crd)
+
+			By("creating the referenced Theme")
+			theme := fixture.Theme("dark", namespace, "solarized-dark")
+			Expect(k8sClient.Create(ctx, theme)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, theme))).To(Succeed())
+			})
+
+			By("eventually transitioning to ThemeReady=True")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionTrue,
+						demov1alpha1.ReasonThemeApplied,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+
+		It("should clean up Theme informer when Theme CRD is removed", func(ctx SpecContext) {
+			widget := fixture.Widget("theme-removal", namespace, fixture.WithThemeRef("removable"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("installing Theme CRD and creating Theme")
+			crd := installCRD(ctx, themeCRDPath)
+
+			theme := fixture.Theme("removable", namespace, "will-go-away")
+			Expect(k8sClient.Create(ctx, theme)).To(Succeed())
+
+			By("waiting for ThemeReady=True")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveCondition(demov1alpha1.ConditionThemeReady, metav1.ConditionTrue),
+				)
+			}).WithContext(ctx).Should(Succeed())
+
+			By("removing the Theme CRD")
+			removeCRD(ctx, crd)
+
+			By("eventually transitioning back to ThemeCRDNotAvailable")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+	})
+
+	Context("both pluginRef and themeRef", func() {
+
+		It("should track both conditions independently", func(ctx SpecContext) {
+			widget := fixture.Widget("dual-ref", namespace,
+				fixture.WithPluginRef("dual-plugin"),
+				fixture.WithThemeRef("dual-theme"),
+			)
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("initially both conditions should be CRDNotAvailable")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(And(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
+					),
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				))
+			}).WithContext(ctx).Should(Succeed())
+
+			By("installing only PluginConfig CRD and creating the plugin")
+			pluginCRD := installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(pluginCRD)
+
+			plugin := fixture.PluginConfig("dual-plugin", namespace, "plugin-active")
+			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, plugin))).To(Succeed())
+			})
+
+			By("PluginReady=True while ThemeReady remains False")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(And(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionTrue,
+						demov1alpha1.ReasonPluginApplied,
+					),
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				))
+			}).WithContext(ctx).Should(Succeed())
+
+			By("installing Theme CRD and creating the theme")
+			themeCRD := installCRD(ctx, themeCRDPath)
+			deferCRDCleanup(themeCRD)
+
+			theme := fixture.Theme("dual-theme", namespace, "ocean-blue")
+			Expect(k8sClient.Create(ctx, theme)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, theme))).To(Succeed())
+			})
+
+			By("both conditions should be True with correct observedGeneration")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.ObservedGeneration).To(Equal(widget.Generation))
+				g.Expect(widget.Status.Conditions).To(And(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionTrue,
+						demov1alpha1.ReasonPluginApplied,
+					),
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionTrue,
+						demov1alpha1.ReasonThemeApplied,
+					),
+				))
+			}).WithContext(ctx).Should(Succeed())
+		})
+	})
 })
 
 func loadCRDFromFile(path string) *apiextensionsv1.CustomResourceDefinition {
@@ -414,4 +618,3 @@ func loadCRDFromFile(path string) *apiextensionsv1.CustomResourceDefinition {
 
 	return crd
 }
-

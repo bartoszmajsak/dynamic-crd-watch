@@ -14,9 +14,9 @@ package dynamicwatch
 import (
 	"context"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -71,13 +71,6 @@ func SetActive[T client.Object](w *Watcher[T], active bool) {
 // bypassing the controller-runtime event pipeline. This lets tests verify
 // CRD removal/addition logic (informer teardown, requeue decisions) in
 // isolation, without needing a running informer for the CRD type.
-func SimulateCRDChange[T client.Object](w *Watcher[T], ctx context.Context, obj client.Object) []reconcile.Request {
-	return w.onCRDChange(ctx, obj)
-}
-
-// CRDPredicate exposes the name-filtering predicate that Register() wires
-// into the controller builder. Tests use this to verify that only events
-// for the target CRD name pass through.
-func CRDPredicate[T client.Object](w *Watcher[T]) predicate.Predicate {
-	return w.crdPredicate()
+func SimulateCRDChange[T client.Object](w *Watcher[T], ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) []reconcile.Request {
+	return w.onCRDChange(ctx, crd)
 }

@@ -40,8 +40,8 @@ func collectKubeDiagnostics(ctx context.Context) {
 
 		for i := range widgets.Items {
 			w := &widgets.Items[i]
-			fmt.Fprintf(GinkgoWriter, "  %s/%s: pluginRef=%q conditions=%v\n",
-				w.Namespace, w.Name, w.Spec.PluginRef, w.Status.Conditions)
+			fmt.Fprintf(GinkgoWriter, "  %s/%s: pluginRef=%q themeRef=%q conditions=%v\n",
+				w.Namespace, w.Name, w.Spec.PluginRef, w.Spec.ThemeRef, w.Status.Conditions)
 		}
 	}
 

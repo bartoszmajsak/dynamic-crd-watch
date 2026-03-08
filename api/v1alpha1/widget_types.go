@@ -13,6 +13,14 @@ type WidgetSpec struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	PluginRef string `json:"pluginRef,omitempty"`
+
+	// themeRef is an optional reference to a Theme resource name.
+	// When set, the controller will attempt to read the referenced Theme
+	// and apply its color scheme. If the Theme CRD is not installed,
+	// the Widget will report ThemeReady=False.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ThemeRef string `json:"themeRef,omitempty"`
 }
 
 // WidgetStatus defines the observed state of Widget.
@@ -27,7 +35,7 @@ type WidgetStatus struct {
 	// +patchStrategy=merge
 	// +patchMergeKey=type
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchMergeKey:"type" patchStrategy:"merge"`
 }
 
 // +kubebuilder:object:root=true
