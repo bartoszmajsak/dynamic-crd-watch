@@ -1,6 +1,6 @@
 #!/bin/sh
 #MISE description="Deploy controller to the cluster"
-#MISE depends=["generate:manifests"]
+#MISE depends=["generate:manifests", "image:push"]
 
 IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
 

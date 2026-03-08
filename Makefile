@@ -46,7 +46,7 @@ test-int: ## Run integration tests (real cluster, in-process manager). Requires:
 	bash hack/tasks/test/int
 
 .PHONY: test-e2e
-test-e2e: image-build image-push deploy ## Run e2e tests (real cluster, deployed manager). Requires: make kind-create.
+test-e2e: deploy ## Run e2e tests (real cluster, deployed manager). Requires: make kind-create.
 	bash hack/tasks/test/e2e
 
 ##@ Build
@@ -64,7 +64,7 @@ image-build: manifests generate ## Build container image (BUILDER=docker|podman)
 	BUILDER=$(BUILDER) IMG=$(IMG) bash hack/tasks/image/build
 
 .PHONY: image-push
-image-push: ## Push container image to registry.
+image-push: image-build ## Push container image to registry.
 	BUILDER=$(BUILDER) IMG=$(IMG) bash hack/tasks/image/push
 
 ##@ Cluster
@@ -78,7 +78,7 @@ kind-delete: ## Delete the kind cluster.
 	bash hack/kind-with-registry.sh delete
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster.
+deploy: manifests kustomize image-push ## Deploy controller to the K8s cluster.
 	@IMG=$(IMG) PATH=$(LOCALBIN):$$PATH bash hack/tasks/deploy
 
 .PHONY: undeploy

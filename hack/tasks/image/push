@@ -1,5 +1,6 @@
 #!/bin/sh
 #MISE description="Push container image to registry"
+#MISE depends=["image:build"]
 
 BUILDER="${BUILDER:-docker}"
 IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
