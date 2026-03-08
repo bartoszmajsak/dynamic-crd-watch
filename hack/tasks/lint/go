@@ -6,4 +6,4 @@ if [ "${CI:-}" = "true" ]; then
   exit 0
 fi
 
-golangci-lint run --fix
+golangci-lint run

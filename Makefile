@@ -10,13 +10,6 @@ SHELL = /usr/bin/env bash -o pipefail
 
 include Makefile.tools.mk
 
-# Builder-specific flags: docker requires buildx for BuildKit cache mounts.
-ifeq ($(BUILDER),docker)
-  BUILD_CMD = $(BUILDER) buildx build
-else
-  BUILD_CMD = $(BUILDER) build
-endif
-
 ##@ General
 
 .PHONY: help
@@ -27,36 +20,34 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate CRD and RBAC manifests.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+	PATH=$(LOCALBIN):$$PATH bash hack/tasks/generate/manifests
 
 .PHONY: generate
 generate: controller-gen ## Generate DeepCopy methods.
-	$(CONTROLLER_GEN) object paths="./..."
+	PATH=$(LOCALBIN):$$PATH bash hack/tasks/generate/deepcopy
 
 .PHONY: lint
-lint: golangci-lint ## Run all linters (fmt, vet, golangci-lint).
-	go fmt ./...
-	go vet ./...
-	$(GOLANGCI_LINT) run
+lint: golangci-lint ## Run golangci-lint (includes formatting and vet).
+	PATH=$(LOCALBIN):$$PATH bash hack/tasks/lint/go
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint with auto-fix.
-	$(GOLANGCI_LINT) run --fix
+	PATH=$(LOCALBIN):$$PATH bash hack/tasks/lint/fix
 
 ##@ Testing
 
 .PHONY: test
 test: manifests generate envtest ## Run tests (embedded apiserver, in-process manager).
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		go test ./... -coverprofile cover.out
+		bash hack/tasks/test/_default
 
 .PHONY: test-int
 test-int: ## Run integration tests (real cluster, in-process manager). Requires: make kind-create.
-	USE_EXISTING_CLUSTER=true go test -v -count=1 -timeout 10m ./internal/controller/...
+	bash hack/tasks/test/int
 
 .PHONY: test-e2e
 test-e2e: image-build image-push deploy ## Run e2e tests (real cluster, deployed manager). Requires: make kind-create.
-	USE_EXISTING_CLUSTER=true DEPLOYED_MANAGER=true go test -v -count=1 -timeout 10m ./internal/controller/...
+	bash hack/tasks/test/e2e
 
 ##@ Build
 
@@ -70,11 +61,11 @@ run: manifests generate ## Run controller from your host.
 
 .PHONY: image-build
 image-build: manifests generate ## Build container image (BUILDER=docker|podman).
-	$(BUILD_CMD) -t $(IMG) .
+	BUILDER=$(BUILDER) IMG=$(IMG) bash hack/tasks/image/build
 
 .PHONY: image-push
 image-push: ## Push container image to registry.
-	$(BUILDER) push $(IMG)
+	BUILDER=$(BUILDER) IMG=$(IMG) bash hack/tasks/image/push
 
 ##@ Cluster
 
@@ -86,21 +77,13 @@ kind-create: ## Create a kind cluster with local registry.
 kind-delete: ## Delete the kind cluster.
 	bash hack/kind-with-registry.sh delete
 
-ifndef ignore-not-found
-  ignore-not-found = false
-endif
-
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster.
-	@mkdir -p bin/deploy-overlay && \
-	NEW_NAME="$${IMG%:*}" NEW_TAG="$${IMG##*:}" && \
-	printf 'resources:\n- ../../config/default\nimages:\n- name: controller\n  newName: %s\n  newTag: %s\n' \
-		"$$NEW_NAME" "$$NEW_TAG" > bin/deploy-overlay/kustomization.yaml && \
-	$(KUSTOMIZE) build bin/deploy-overlay | kubectl apply --server-side -f -
+	@IMG=$(IMG) PATH=$(LOCALBIN):$$PATH bash hack/tasks/deploy
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster.
-	$(KUSTOMIZE) build config/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+	PATH=$(LOCALBIN):$$PATH kustomize build config/default | kubectl delete --ignore-not-found -f -
 
 .PHONY: validate-manifests
 validate-manifests: manifests kustomize ## Validate all kustomize manifests.
@@ -108,8 +91,8 @@ validate-manifests: manifests kustomize ## Validate all kustomize manifests.
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster.
-	$(KUSTOMIZE) build config/crd | kubectl apply -f -
+	PATH=$(LOCALBIN):$$PATH kustomize build config/crd | kubectl apply -f -
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster.
-	$(KUSTOMIZE) build config/crd | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+	PATH=$(LOCALBIN):$$PATH kustomize build config/crd | kubectl delete --ignore-not-found -f -

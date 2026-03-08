@@ -1,0 +1,7 @@
+#!/bin/sh
+#MISE description="Push container image to registry"
+
+BUILDER="${BUILDER:-docker}"
+IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
+
+$BUILDER push "$IMG"

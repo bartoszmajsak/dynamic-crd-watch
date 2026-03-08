@@ -1,0 +1,4 @@
+#!/bin/sh
+#MISE description="Run golangci-lint with auto-fix"
+
+golangci-lint run --fix

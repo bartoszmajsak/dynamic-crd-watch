@@ -1,3 +1,3 @@
 #!/bin/sh
 #MISE description="Run all linters"
-#MISE depends=["lint:go", "lint:fmt", "lint:vet", "lint:manifests"]
+#MISE depends=["lint:go", "lint:manifests"]
