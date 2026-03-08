@@ -2,7 +2,7 @@
 
 Controllers that depend on optional CRDs - think KEDA, Prometheus Operator, or anything a user *might* install - typically check CRD availability once at startup. Install the CRD later? Restart the controller. Remove it? The informer leaks, retrying list/watch forever.
 
-This project shows how to handle both cases cleanly with controller-runtime, no restarts needed.
+This project shows how to handle both cases cleanly with controller-runtime, no restarts needed. The core logic lives in a reusable [`dynamicwatch`](pkg/dynamicwatch/) package that you can drop into your own controller.
 
 ## How it works
 
@@ -19,20 +19,94 @@ Startup:
   PluginConfig CRD missing   → skip, no watch registered
 
 Runtime - CRD installed:
-  CRD watch fires            → reconcile → ensurePluginWatch()
-                              → ctrl.Watch(source.Kind(...))
+  CRD watch fires            → Ensure() → ctrl.Watch(source.Kind(...))
 
 Runtime - CRD removed:
   CRD watch fires            → cache.RemoveInformer()
-                              → reset watch flag, requeue Widgets
+                              → reset state, requeue affected objects
 ```
 
-The key differences with typical controller-runtime scaffolding that make this work:
+## Using `dynamicwatch` in your controller
 
-- **`Build()` not `Complete()`** - retains the `controller.Controller` reference for dynamic `ctrl.Watch()` calls
-- **`cache.RemoveInformer()`** (controller-runtime v0.19+) - cleanly stops informers when a CRD disappears
-- **Uncached discovery client** - the cached one has a ~10min TTL, which is way too slow for detecting CRD changes
-- **CRD name predicate** - scopes the CRD watch to only the optional CRD we care about
+The package provides a generic `Watcher[T]` that handles one optional CRD's lifecycle. Need multiple optional CRDs? Create one watcher per CRD.
+
+### Setup
+
+Wire the watcher in `SetupWithManager` using a fluent builder that mirrors controller-runtime's API:
+
+```go
+func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    // 1. Build the watcher - GVK is derived from the scheme automatically
+    r.optionalWatch, err = dynamicwatch.For[*v1alpha1.OptionalResource](mgr, "optionalresources.example.com").
+        EnqueueOnObjectChange(r.mapOptionalToParent).   // when an OptionalResource changes
+        EnqueueOnCRDChange(r.allAffectedParents).        // when the CRD itself appears/disappears
+        Build()
+
+    b := ctrl.NewControllerManagedBy(mgr).
+        For(&v1alpha1.MyResource{}).
+        Named("my-controller")
+
+    // 2. Register - adds a CRD watch to detect install/removal
+    r.optionalWatch.Register(b)
+
+    // 3. Build + Bind - connects the watcher to the controller
+    c, err := b.Build(r)
+    r.optionalWatch.Bind(c)
+
+    return nil
+}
+```
+
+The three-step `Build` / `Register` / `Bind` dance exists because controller-runtime's builder doesn't expose the `controller.Controller` until after `Build()`, but the CRD watch must be registered *before* `Build()`. There's no way around this without wrapping the builder.
+
+### Reconcile loop
+
+In your `Reconcile` method, call `Ensure` to check availability and register the watch if the CRD just appeared:
+
+```go
+func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    // ...
+
+    switch r.optionalWatch.Ensure(ctx) {
+    case dynamicwatch.JustRegistered:
+        // Watch was just created - informer cache hasn't synced yet.
+        // Requeue to let it catch up.
+        return ctrl.Result{RequeueAfter: time.Second}, nil
+    case dynamicwatch.NotAvailable:
+        // CRD not installed - set a condition and move on.
+        return ctrl.Result{}, r.setNotAvailableCondition(ctx, obj)
+    case dynamicwatch.Active:
+        // Watch is running, proceed to read.
+    }
+
+    // Read the optional resource through the watcher's cache-aware Get.
+    optional := &v1alpha1.OptionalResource{}
+    if err := r.optionalWatch.Get(ctx, key, optional); err != nil {
+        if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
+            // Informer was removed between Ensure and Get (race).
+            // Watcher already reset its state - just requeue.
+            return ctrl.Result{RequeueAfter: time.Second}, nil
+        }
+        return ctrl.Result{}, err
+    }
+
+    // Use optional...
+}
+```
+
+### Prerequisites
+
+Your cache **must** have `ReaderFailOnMissingInformer: true`:
+
+```go
+mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+    Cache: cache.Options{
+        ReaderFailOnMissingInformer: true,
+    },
+})
+```
+
+Without it, a `Get` after informer removal silently creates a new informer that blocks forever. See ["Things that will bite you"](#readerfailonmissinginformer-is-not-optional) below.
 
 ## Things that will bite you
 
@@ -49,7 +123,7 @@ During CRD deletion, status update events arrive *before* `DeletionTimestamp` is
 Check both:
 
 ```go
-crdBeingRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
+crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 ```
 
 ### The `RemoveInformer` / `r.Get` race
@@ -65,6 +139,8 @@ The fastest way to see it in action:
 ```bash
 make kind-create
 make deploy
+kubectl rollout status deployment/dynamic-watch-poc-controller-manager \
+  -n dynamic-watch-poc-system --timeout=60s
 
 # Create a Widget that references a plugin - CRD doesn't exist yet
 kubectl apply -f - <<EOF
@@ -88,7 +164,6 @@ apiVersion: demo.example.com/v1alpha1
 kind: PluginConfig
 metadata:
   name: my-plugin
-  namespace: default
 spec:
   setting: "hello"
 EOF

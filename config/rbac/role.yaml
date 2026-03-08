@@ -5,13 +5,6 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
   - apiextensions.k8s.io
   resources:
   - customresourcedefinitions
@@ -23,28 +16,11 @@ rules:
   - demo.example.com
   resources:
   - pluginconfigs
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - demo.example.com
-  resources:
   - widgets
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - demo.example.com
-  resources:
-  - widgets/finalizers
-  verbs:
-  - update
 - apiGroups:
   - demo.example.com
   resources:
@@ -52,4 +28,10 @@ rules:
   verbs:
   - get
   - patch
-  - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

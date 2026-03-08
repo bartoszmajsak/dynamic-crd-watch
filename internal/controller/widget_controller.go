@@ -4,27 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"time"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
+	"github.com/bartoszmajsak/dynamic-watch-poc/pkg/dynamicwatch"
 )
 
 const (
@@ -38,35 +31,20 @@ const (
 	pluginRefField      = "spec.pluginRef"
 )
 
-type watchState int
-
-const (
-	watchNotAvailable  watchState = iota
-	watchAlreadyActive
-	watchJustRegistered
-)
-
 // WidgetReconciler reconciles a Widget object.
 type WidgetReconciler struct {
 	client.Client
 
-	Scheme   *runtime.Scheme
-	recorder record.EventRecorder
-
-	// Fields for dynamic watch management.
-	ctrl              controller.Controller
-	cache             cache.Cache
-	discoveryClient   *discovery.DiscoveryClient
-	mu                sync.Mutex
-	pluginWatchActive bool
+	Scheme      *runtime.Scheme
+	recorder    events.EventRecorder
+	pluginWatch *dynamicwatch.Watcher[*demov1alpha1.PluginConfig]
 }
 
-// +kubebuilder:rbac:groups=demo.example.com,resources=widgets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=demo.example.com,resources=widgets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=demo.example.com,resources=widgets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=demo.example.com,resources=widgets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=demo.example.com,resources=widgets/status,verbs=get;patch
 // +kubebuilder:rbac:groups=demo.example.com,resources=pluginconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -88,11 +66,13 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	switch r.ensurePluginWatch(ctx) {
-	case watchJustRegistered:
-		r.recorder.Event(widget, corev1.EventTypeNormal, "PluginWatchRegistered",
-			"Dynamic watch for PluginConfig CRD activated")
-	case watchNotAvailable:
+	switch r.pluginWatch.Ensure(ctx) {
+	case dynamicwatch.JustRegistered:
+		r.recorder.Eventf(widget, nil, corev1.EventTypeNormal, "PluginWatchRegistered",
+			"RegisterWatch", "Dynamic watch for PluginConfig CRD activated")
+
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	case dynamicwatch.NotAvailable:
 		meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
 			Type:               ConditionPluginReady,
 			Status:             metav1.ConditionFalse,
@@ -102,27 +82,20 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		})
 
 		return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
-	case watchAlreadyActive:
+	case dynamicwatch.Active:
 		// Watch already running, proceed to read PluginConfig.
 	}
 
-	// CRD is available — try to read the referenced PluginConfig.
+	// CRD is available - try to read the referenced PluginConfig.
 	plugin := &demov1alpha1.PluginConfig{}
 	pluginKey := client.ObjectKey{Name: widget.Spec.PluginRef, Namespace: widget.Namespace}
 
-	if err := r.Get(ctx, pluginKey, plugin); err != nil {
-		// If the informer was removed (CRD disappeared between ensurePluginWatch and here),
-		// reset the watch state and requeue so the next reconcile detects CRD absence properly.
-		var notCached *cache.ErrResourceNotCached
-		if errors.As(err, &notCached) {
-			r.recorder.Event(widget, corev1.EventTypeWarning, "PluginCacheInvalidated",
-				"PluginConfig informer was removed during reconciliation; requeuing")
+	if err := r.pluginWatch.Get(ctx, pluginKey, plugin); err != nil {
+		if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
+			r.recorder.Eventf(widget, nil, corev1.EventTypeWarning, "PluginCacheInvalidated",
+				"CacheInvalidated", "PluginConfig informer was removed during reconciliation; requeuing")
 
-			r.mu.Lock()
-			r.pluginWatchActive = false
-			r.mu.Unlock()
-
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 
 		if client.IgnoreNotFound(err) == nil {
@@ -152,113 +125,6 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	})
 
 	return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
-}
-
-// ensurePluginWatch checks if the PluginConfig CRD is available and registers
-// a dynamic watch if it is.
-//
-// Uses a check-lock-check pattern to avoid holding the mutex during
-// the network call to the discovery API.
-func (r *WidgetReconciler) ensurePluginWatch(ctx context.Context) watchState {
-	r.mu.Lock()
-	if r.pluginWatchActive {
-		r.mu.Unlock()
-
-		return watchAlreadyActive
-	}
-	r.mu.Unlock()
-
-	if !r.isCRDAvailable(ctx) {
-		return watchNotAvailable
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check: another goroutine may have registered while we were checking discovery.
-	if r.pluginWatchActive {
-		return watchAlreadyActive
-	}
-
-	log := logf.FromContext(ctx)
-
-	// Register a watch for PluginConfig changes. When a PluginConfig is
-	// created/updated/deleted, requeue all Widgets that reference it by name.
-	src := source.Kind(r.cache, &demov1alpha1.PluginConfig{},
-		handler.TypedEnqueueRequestsFromMapFunc(
-			func(ctx context.Context, obj *demov1alpha1.PluginConfig) []reconcile.Request {
-				return r.pluginConfigToWidgets(ctx, obj)
-			},
-		),
-	)
-
-	if err := r.ctrl.Watch(src); err != nil {
-		log.Error(err, "Failed to register PluginConfig watch")
-
-		return watchNotAvailable
-	}
-
-	r.pluginWatchActive = true
-	log.Info("Dynamically registered watch for PluginConfig")
-
-	return watchJustRegistered
-}
-
-// isCRDAvailable checks the discovery API to determine if the PluginConfig
-// CRD is installed. Uses a direct discovery call (not cached) for freshness.
-func (r *WidgetReconciler) isCRDAvailable(ctx context.Context) bool {
-	resources, err := r.discoveryClient.ServerResourcesForGroupVersion(demov1alpha1.GroupVersion.String())
-	if err != nil {
-		logf.FromContext(ctx).V(1).Info("PluginConfig group not available via discovery", "error", err)
-
-		return false
-	}
-
-	for i := range resources.APIResources {
-		if resources.APIResources[i].Kind == "PluginConfig" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// onCRDChange handles CRD create/delete events for the PluginConfig CRD.
-// On creation: requeue all Widgets with pluginRef so they can register the watch.
-// On deletion: clean up the informer and requeue affected Widgets.
-//
-// Note: this handler runs on the controller work queue's event processing goroutine,
-// not on a reconcile worker. The mutex protects against concurrent reconcile access
-// to pluginWatchActive.
-func (r *WidgetReconciler) onCRDChange(ctx context.Context, obj client.Object) []reconcile.Request {
-	log := logf.FromContext(ctx)
-
-	crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
-	if !ok {
-		return nil
-	}
-
-	if crd.Name != pluginConfigCRDName {
-		return nil
-	}
-
-	crdBeingRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
-	if crdBeingRemoved {
-		r.mu.Lock()
-		if r.pluginWatchActive {
-			if err := r.cache.RemoveInformer(ctx, &demov1alpha1.PluginConfig{}); err != nil {
-				log.Error(err, "Failed to remove PluginConfig informer")
-			}
-
-			r.pluginWatchActive = false
-			log.Info("Removed PluginConfig watch after CRD deletion")
-		}
-		r.mu.Unlock()
-	} else {
-		log.Info("PluginConfig CRD detected, will requeue affected Widgets")
-	}
-
-	return r.allWidgetsWithPluginRef(ctx)
 }
 
 // pluginConfigToWidgets maps a PluginConfig event to reconcile requests for
@@ -313,14 +179,16 @@ func (r *WidgetReconciler) allWidgetsWithPluginRef(ctx context.Context) []reconc
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.cache = mgr.GetCache()
-	r.recorder = mgr.GetEventRecorderFor("widget-controller")
+	r.recorder = mgr.GetEventRecorder("widget-controller")
 
-	dc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	var err error
+	r.pluginWatch, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, pluginConfigCRDName).
+		EnqueueOnObjectChange(r.pluginConfigToWidgets).
+		EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
+		Build()
 	if err != nil {
-		return fmt.Errorf("creating discovery client: %w", err)
+		return fmt.Errorf("setting up plugin watch: %w", err)
 	}
-	r.discoveryClient = dc
 
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
@@ -338,35 +206,18 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("indexing %s: %w", pluginRefField, err)
 	}
 
-	r.ctrl, err = ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.Widget{}).
-		Named("widget").
-		// Watch CRD resources, scoped to only the PluginConfig CRD by name.
-		Watches(&apiextensionsv1.CustomResourceDefinition{},
-			handler.EnqueueRequestsFromMapFunc(r.onCRDChange),
-			builder.WithPredicates(crdNamePredicate(pluginConfigCRDName)),
-		).
-		Build(r)
+		Named("widget")
 
-	return err
-}
+	r.pluginWatch.Register(b)
 
-// isCRDEstablished checks whether a CRD has the Established condition set to True.
-func isCRDEstablished(crd *apiextensionsv1.CustomResourceDefinition) bool {
-	for _, c := range crd.Status.Conditions {
-		if c.Type == apiextensionsv1.Established {
-			return c.Status == apiextensionsv1.ConditionTrue
-		}
+	c, err := b.Build(r)
+	if err != nil {
+		return err
 	}
 
-	return false
-}
+	r.pluginWatch.Bind(c)
 
-// crdNamePredicate filters CRD events to only those matching the given CRD name.
-// This ensures the informer delivers events but we only process the one we care about,
-// avoiding unnecessary reconcile triggers for unrelated CRDs.
-func crdNamePredicate(name string) predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		return obj.GetName() == name
-	})
+	return nil
 }

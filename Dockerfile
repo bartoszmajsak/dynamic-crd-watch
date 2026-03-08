@@ -9,6 +9,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
