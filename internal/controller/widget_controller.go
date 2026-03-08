@@ -7,8 +7,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,12 +19,6 @@ import (
 )
 
 const (
-	ConditionPluginReady = "PluginReady"
-
-	ReasonPluginCRDNotAvailable = "PluginCRDNotAvailable"
-	ReasonPluginApplied         = "PluginApplied"
-	ReasonPluginNotFound        = "PluginNotFound"
-
 	pluginConfigCRDName = "pluginconfigs.demo.example.com"
 	pluginRefField      = "spec.pluginRef"
 )
@@ -57,8 +49,8 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	patch := client.MergeFrom(widget.DeepCopy())
 
 	if widget.Spec.PluginRef == "" {
-		if meta.FindStatusCondition(widget.Status.Conditions, ConditionPluginReady) != nil {
-			meta.RemoveStatusCondition(&widget.Status.Conditions, ConditionPluginReady)
+		if widget.HasPluginCondition() {
+			widget.RemovePluginCondition()
 
 			return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
 		}
@@ -73,13 +65,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	case dynamicwatch.NotAvailable:
-		meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
-			Type:               ConditionPluginReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             ReasonPluginCRDNotAvailable,
-			Message:            "PluginConfig CRD is not installed",
-			ObservedGeneration: widget.Generation,
-		})
+		widget.MarkPluginCRDNotAvailable()
 
 		return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
 	case dynamicwatch.Active:
@@ -100,14 +86,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced PluginConfig not found", "pluginRef", widget.Spec.PluginRef)
-
-			meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
-				Type:               ConditionPluginReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             ReasonPluginNotFound,
-				Message:            "Referenced PluginConfig does not exist",
-				ObservedGeneration: widget.Generation,
-			})
+			widget.MarkPluginNotFound()
 
 			return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
 		}
@@ -116,13 +95,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	log.Info("Applied PluginConfig", "pluginRef", widget.Spec.PluginRef, "setting", plugin.Spec.Setting)
-	meta.SetStatusCondition(&widget.Status.Conditions, metav1.Condition{
-		Type:               ConditionPluginReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonPluginApplied,
-		Message:            plugin.Spec.Setting,
-		ObservedGeneration: widget.Generation,
-	})
+	widget.MarkPluginApplied(plugin.Spec.Setting)
 
 	return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
 }

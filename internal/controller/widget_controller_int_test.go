@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/bartoszmajsak/dynamic-watch-poc/internal/controller"
+	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
 	"github.com/bartoszmajsak/dynamic-watch-poc/internal/controller/fixture"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -38,7 +38,7 @@ var _ = Describe("Widget Controller", func() {
 			Consistently(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.NotHaveCondition(controller.ConditionPluginReady),
+					fixture.NotHaveCondition(demov1alpha1.ConditionPluginReady),
 				)
 			}).WithContext(ctx).WithTimeout(2 * time.Second).Should(Succeed())
 		})
@@ -57,9 +57,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginCRDNotAvailable,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -123,9 +123,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginCRDNotAvailable,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -145,9 +145,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionTrue,
-						controller.ReasonPluginApplied,
+						demov1alpha1.ReasonPluginApplied,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -170,7 +170,7 @@ var _ = Describe("Widget Controller", func() {
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.HaveCondition(controller.ConditionPluginReady, metav1.ConditionTrue),
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
 				)
 			}).WithContext(ctx).Should(Succeed())
 
@@ -182,9 +182,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginCRDNotAvailable,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -205,9 +205,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginNotFound,
+						demov1alpha1.ReasonPluginNotFound,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -229,7 +229,7 @@ var _ = Describe("Widget Controller", func() {
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.HaveCondition(controller.ConditionPluginReady, metav1.ConditionTrue),
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
 				)
 			}).WithContext(ctx).Should(Succeed())
 
@@ -240,9 +240,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginCRDNotAvailable,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -256,7 +256,7 @@ var _ = Describe("Widget Controller", func() {
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.HaveCondition(controller.ConditionPluginReady, metav1.ConditionTrue),
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
 				)
 			}).WithContext(ctx).Should(Succeed())
 		})
@@ -279,7 +279,7 @@ var _ = Describe("Widget Controller", func() {
 			Consistently(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.NotHaveCondition(controller.ConditionPluginReady),
+					fixture.NotHaveCondition(demov1alpha1.ConditionPluginReady),
 				)
 			}).WithContext(ctx).WithTimeout(2 * time.Second).Should(Succeed())
 
@@ -298,9 +298,9 @@ var _ = Describe("Widget Controller", func() {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
 					fixture.HaveConditionWithReason(
-						controller.ConditionPluginReady,
+						demov1alpha1.ConditionPluginReady,
 						metav1.ConditionFalse,
-						controller.ReasonPluginCRDNotAvailable,
+						demov1alpha1.ReasonPluginCRDNotAvailable,
 					),
 				)
 			}).WithContext(ctx).Should(Succeed())
@@ -317,7 +317,7 @@ var _ = Describe("Widget Controller", func() {
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.HaveCondition(controller.ConditionPluginReady, metav1.ConditionFalse),
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionFalse),
 				)
 			}).WithContext(ctx).Should(Succeed())
 
@@ -335,7 +335,7 @@ var _ = Describe("Widget Controller", func() {
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
 				g.Expect(widget.Status.Conditions).To(
-					fixture.NotHaveCondition(controller.ConditionPluginReady),
+					fixture.NotHaveCondition(demov1alpha1.ConditionPluginReady),
 				)
 			}).WithContext(ctx).Should(Succeed())
 		})
