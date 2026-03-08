@@ -20,14 +20,12 @@ import (
 
 	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
 	"github.com/bartoszmajsak/dynamic-watch-poc/internal/controller"
-	"github.com/bartoszmajsak/dynamic-watch-poc/internal/controller/fixture"
+	"github.com/bartoszmajsak/dynamic-watch-poc/testing/cluster"
+	"github.com/bartoszmajsak/dynamic-watch-poc/testing/fixture"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
-
-// managerNamespace must match kustomize output (config/default/kustomization.yaml).
-const managerNamespace = "dynamic-watch-poc-system"
 
 var (
 	ctx       context.Context
@@ -102,7 +100,7 @@ var _ = BeforeSuite(func() {
 // ensuring diagnostics are collected when tests hang or get Ctrl+C'd.
 var _ = ReportAfterEach(func(report SpecReport) {
 	if deployedManager && report.Failed() {
-		collectKubeDiagnostics(ctx)
+		cluster.CollectKubeDiagnostics(ctx, k8sClient)
 	}
 })
 
@@ -129,7 +127,7 @@ func setupDeployedManager() {
 	directClient = k8sClient // no manager cache in deployed mode
 
 	By("verifying manager deployment is ready")
-	waitForManagerReady(ctx)
+	cluster.WaitForManagerReady(ctx, k8sClient)
 }
 
 // setupExistingCluster connects to a real cluster via kubeconfig and starts

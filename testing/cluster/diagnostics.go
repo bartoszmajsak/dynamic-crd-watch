@@ -1,4 +1,4 @@
-package controller_test
+package cluster
 
 import (
 	"context"
@@ -18,7 +18,10 @@ import (
 // managerDeploymentName must match kustomize output (namePrefix + "controller-manager").
 const managerDeploymentName = "dynamic-watch-poc-controller-manager"
 
-func waitForManagerReady(ctx context.Context) {
+// managerNamespace must match kustomize output (config/default/kustomization.yaml).
+const managerNamespace = "dynamic-watch-poc-system"
+
+func WaitForManagerReady(ctx context.Context, k8sClient client.Client) {
 	deploy := &appsv1.Deployment{}
 	key := client.ObjectKey{Name: managerDeploymentName, Namespace: managerNamespace}
 
@@ -31,7 +34,7 @@ func waitForManagerReady(ctx context.Context) {
 	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 }
 
-func collectKubeDiagnostics(ctx context.Context) {
+func CollectKubeDiagnostics(ctx context.Context, k8sClient client.Client) {
 	fmt.Fprintln(GinkgoWriter, "\n=== Cluster Diagnostics ===")
 
 	var widgets demov1alpha1.WidgetList

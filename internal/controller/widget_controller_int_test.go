@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
-	"github.com/bartoszmajsak/dynamic-watch-poc/internal/controller/fixture"
+	"github.com/bartoszmajsak/dynamic-watch-poc/testing/fixture"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
