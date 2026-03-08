@@ -22,6 +22,33 @@ var _ = Describe("Widget Controller", func() {
 
 	const namespace = "default"
 
+	installPluginConfigCRD := func(ctx context.Context) *apiextensionsv1.CustomResourceDefinition {
+		crd := loadCRDFromFile(pluginConfigCRDPath)
+		Expect(k8sClient.Create(ctx, crd)).To(Succeed())
+
+		Eventually(func(g Gomega, ctx context.Context) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)).To(Succeed())
+			established := false
+			for _, c := range crd.Status.Conditions {
+				if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
+					established = true
+				}
+			}
+			g.Expect(established).To(BeTrue(), "CRD should be established")
+		}).WithContext(ctx).Should(Succeed())
+
+		return crd
+	}
+
+	removePluginConfigCRD := func(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) {
+		Expect(k8sClient.Delete(ctx, crd)).To(Succeed())
+
+		Eventually(func(g Gomega, ctx context.Context) {
+			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)
+			g.Expect(err).To(HaveOccurred())
+		}).WithContext(ctx).Should(Succeed())
+	}
+
 	Context("without pluginRef", func() {
 
 		It("should reconcile without setting PluginReady condition", func(ctx SpecContext) {
@@ -66,50 +93,7 @@ var _ = Describe("Widget Controller", func() {
 		})
 	})
 
-	Context("dynamic CRD lifecycle", Ordered, func() {
-
-		var crd *apiextensionsv1.CustomResourceDefinition
-
-		AfterEach(func(ctx SpecContext) {
-			if crd == nil {
-				return
-			}
-
-			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
-
-			Eventually(func(g Gomega, ctx context.Context) {
-				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
-				g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
-			}).WithContext(ctx).Should(Succeed())
-
-			crd = nil
-		})
-
-		installPluginConfigCRD := func(ctx context.Context) {
-			crd = loadCRDFromFile(pluginConfigCRDPath)
-			Expect(k8sClient.Create(ctx, crd)).To(Succeed())
-
-			// Wait for the CRD to be established before proceeding.
-			Eventually(func(g Gomega, ctx context.Context) {
-				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)).To(Succeed())
-				established := false
-				for _, c := range crd.Status.Conditions {
-					if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
-						established = true
-					}
-				}
-				g.Expect(established).To(BeTrue(), "CRD should be established")
-			}).WithContext(ctx).Should(Succeed())
-		}
-
-		removePluginConfigCRD := func(ctx context.Context) {
-			Expect(k8sClient.Delete(ctx, crd)).To(Succeed())
-
-			Eventually(func(g Gomega, ctx context.Context) {
-				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), crd)
-				g.Expect(err).To(HaveOccurred())
-			}).WithContext(ctx).Should(Succeed())
-		}
+	Context("dynamic CRD lifecycle", func() {
 
 		It("should dynamically register watch when CRD is installed", func(ctx SpecContext) {
 			widget := fixture.Widget("dynamic-watch", namespace, fixture.WithPluginRef("my-plugin"))
@@ -131,7 +115,14 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("installing PluginConfig CRD at runtime")
-			installPluginConfigCRD(ctx)
+			crd := installPluginConfigCRD(ctx)
+			DeferCleanup(func(ctx SpecContext) {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
+				Eventually(func(g Gomega, ctx context.Context) {
+					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
+					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
+				}).WithContext(ctx).Should(Succeed())
+			})
 
 			By("creating the referenced PluginConfig")
 			plugin := fixture.PluginConfig("my-plugin", namespace, "hello-from-plugin")
@@ -161,7 +152,7 @@ var _ = Describe("Widget Controller", func() {
 			})
 
 			By("installing CRD and creating PluginConfig")
-			installPluginConfigCRD(ctx)
+			crd := installPluginConfigCRD(ctx)
 
 			plugin := fixture.PluginConfig("removal-plugin", namespace, "will-be-removed")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -175,7 +166,7 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 
 			By("removing the PluginConfig CRD")
-			removePluginConfigCRD(ctx)
+			removePluginConfigCRD(ctx, crd)
 
 			By("eventually transitioning back to PluginCRDNotAvailable")
 			Eventually(func(g Gomega, ctx context.Context) {
@@ -192,7 +183,14 @@ var _ = Describe("Widget Controller", func() {
 
 		It("should set PluginNotFound when CRD exists but referenced PluginConfig does not", func(ctx SpecContext) {
 			By("installing PluginConfig CRD")
-			installPluginConfigCRD(ctx)
+			crd := installPluginConfigCRD(ctx)
+			DeferCleanup(func(ctx SpecContext) {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
+				Eventually(func(g Gomega, ctx context.Context) {
+					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
+					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
+				}).WithContext(ctx).Should(Succeed())
+			})
 
 			widget := fixture.Widget("missing-plugin", namespace, fixture.WithPluginRef("nonexistent"))
 			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
@@ -213,6 +211,64 @@ var _ = Describe("Widget Controller", func() {
 			}).WithContext(ctx).Should(Succeed())
 		})
 
+		It("should update Widget condition when PluginConfig setting changes", func(ctx SpecContext) {
+			By("installing PluginConfig CRD")
+			crd := installPluginConfigCRD(ctx)
+			DeferCleanup(func(ctx SpecContext) {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
+				Eventually(func(g Gomega, ctx context.Context) {
+					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
+					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
+				}).WithContext(ctx).Should(Succeed())
+			})
+
+			plugin := fixture.PluginConfig("update-test", namespace, "original-setting")
+			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, plugin))).To(Succeed())
+			})
+
+			widget := fixture.Widget("watches-update", namespace, fixture.WithPluginRef("update-test"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("waiting for PluginReady=True with original setting")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionTrue,
+						demov1alpha1.ReasonPluginApplied,
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+
+			By("updating PluginConfig setting")
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(plugin), plugin); err != nil {
+					return err
+				}
+				plugin.Spec.Setting = "updated-setting"
+
+				return k8sClient.Update(ctx, plugin)
+			})).To(Succeed())
+
+			By("eventually reflecting the new setting in the condition message")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithMessage(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionTrue,
+						"updated-setting",
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+
 		It("should handle full add/remove/re-add cycle", func(ctx SpecContext) {
 			widget := fixture.Widget("full-cycle", namespace, fixture.WithPluginRef("cycle-plugin"))
 			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
@@ -220,8 +276,8 @@ var _ = Describe("Widget Controller", func() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
 			})
 
-			By("step 1: install CRD, create plugin — should become ready")
-			installPluginConfigCRD(ctx)
+			By("step 1: install CRD, create plugin - should become ready")
+			crd := installPluginConfigCRD(ctx)
 
 			plugin := fixture.PluginConfig("cycle-plugin", namespace, "first-install")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -233,8 +289,8 @@ var _ = Describe("Widget Controller", func() {
 				)
 			}).WithContext(ctx).Should(Succeed())
 
-			By("step 2: remove CRD — should become not available")
-			removePluginConfigCRD(ctx)
+			By("step 2: remove CRD - should become not available")
+			removePluginConfigCRD(ctx, crd)
 
 			Eventually(func(g Gomega, ctx context.Context) {
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
@@ -247,8 +303,15 @@ var _ = Describe("Widget Controller", func() {
 				)
 			}).WithContext(ctx).Should(Succeed())
 
-			By("step 3: re-install CRD, create plugin again — should become ready again")
-			installPluginConfigCRD(ctx)
+			By("step 3: re-install CRD, create plugin again - should become ready again")
+			crd = installPluginConfigCRD(ctx)
+			DeferCleanup(func(ctx SpecContext) {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, crd))
+				Eventually(func(g Gomega, ctx context.Context) {
+					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{})
+					g.Expect(err).To(HaveOccurred(), "CRD should be deleted")
+				}).WithContext(ctx).Should(Succeed())
+			})
 
 			plugin = fixture.PluginConfig("cycle-plugin", namespace, "second-install")
 			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
@@ -351,3 +414,4 @@ func loadCRDFromFile(path string) *apiextensionsv1.CustomResourceDefinition {
 
 	return crd
 }
+

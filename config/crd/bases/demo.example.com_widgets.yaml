@@ -45,6 +45,7 @@ spec:
                   When set, the controller will attempt to read the referenced PluginConfig
                   and apply its settings. If the PluginConfig CRD is not installed,
                   the Widget will report PluginReady=False.
+                minLength: 1
                 type: string
             type: object
           status:
@@ -111,6 +112,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
             type: object
         required:
         - metadata

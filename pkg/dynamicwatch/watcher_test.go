@@ -414,6 +414,26 @@ func TestCRDPredicate_FiltersByName(t *testing.T) {
 	}
 }
 
+func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
+	fc := &fakeController{}
+	w := newTestWatcher(&fakeCache{}, fc)
+	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool { return true })
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.Ensure(t.Context())
+		}()
+	}
+	wg.Wait()
+
+	if fc.WatchCallCount() != 1 {
+		t.Errorf("expected exactly 1 Watch call from 10 concurrent Ensure calls, got %d", fc.WatchCallCount())
+	}
+}
+
 func TestBind_PanicsOnNilController(t *testing.T) {
 	w := newTestWatcher(&fakeCache{}, nil)
 

@@ -47,6 +47,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	patch := client.MergeFrom(widget.DeepCopy())
+	widget.Status.ObservedGeneration = widget.Generation
 
 	if widget.Spec.PluginRef == "" {
 		if widget.HasPluginCondition() {
@@ -86,7 +87,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced PluginConfig not found", "pluginRef", widget.Spec.PluginRef)
-			widget.MarkPluginNotFound()
+			widget.MarkPluginNotFound(widget.Spec.PluginRef)
 
 			return ctrl.Result{}, r.Status().Patch(ctx, widget, patch)
 		}

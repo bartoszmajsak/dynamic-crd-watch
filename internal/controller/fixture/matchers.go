@@ -28,6 +28,17 @@ func HaveConditionWithReason(conditionType string, status metav1.ConditionStatus
 	}
 }
 
+// HaveConditionWithMessage returns a Gomega matcher that checks whether a slice of
+// metav1.Condition contains a condition with the given type, status, and message.
+func HaveConditionWithMessage(conditionType string, status metav1.ConditionStatus, message string) types.GomegaMatcher {
+	return &conditionMatcher{
+		conditionType: conditionType,
+		status:        status,
+		message:       message,
+		checkMessage:  true,
+	}
+}
+
 // NotHaveCondition returns a Gomega matcher that checks whether a slice of
 // metav1.Condition does NOT contain a condition with the given type.
 func NotHaveCondition(conditionType string) types.GomegaMatcher {
@@ -41,6 +52,8 @@ type conditionMatcher struct {
 	status        metav1.ConditionStatus
 	reason        string
 	checkReason   bool
+	message       string
+	checkMessage  bool
 }
 
 func (m *conditionMatcher) Match(actual any) (bool, error) {
@@ -62,27 +75,32 @@ func (m *conditionMatcher) Match(actual any) (bool, error) {
 		return false, nil
 	}
 
+	if m.checkMessage && cond.Message != m.message {
+		return false, nil
+	}
+
 	return true, nil
 }
 
-func (m *conditionMatcher) FailureMessage(actual any) string {
+func (m *conditionMatcher) describe() string {
+	desc := fmt.Sprintf("%s=%s", m.conditionType, m.status)
 	if m.checkReason {
-		return fmt.Sprintf("expected conditions to contain %s=%s (reason=%s), got:\n%v",
-			m.conditionType, m.status, m.reason, actual)
+		desc += fmt.Sprintf(" (reason=%s)", m.reason)
 	}
 
-	return fmt.Sprintf("expected conditions to contain %s=%s, got:\n%v",
-		m.conditionType, m.status, actual)
+	if m.checkMessage {
+		desc += fmt.Sprintf(" (message=%s)", m.message)
+	}
+
+	return desc
+}
+
+func (m *conditionMatcher) FailureMessage(actual any) string {
+	return fmt.Sprintf("expected conditions to contain %s, got:\n%v", m.describe(), actual)
 }
 
 func (m *conditionMatcher) NegatedFailureMessage(actual any) string {
-	if m.checkReason {
-		return fmt.Sprintf("expected conditions NOT to contain %s=%s (reason=%s), got:\n%v",
-			m.conditionType, m.status, m.reason, actual)
-	}
-
-	return fmt.Sprintf("expected conditions NOT to contain %s=%s, got:\n%v",
-		m.conditionType, m.status, actual)
+	return fmt.Sprintf("expected conditions NOT to contain %s, got:\n%v", m.describe(), actual)
 }
 
 type noConditionMatcher struct {
