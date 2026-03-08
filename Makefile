@@ -92,8 +92,11 @@ endif
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default | kubectl apply -f -
+	@mkdir -p bin/deploy-overlay && \
+	NEW_NAME="$${IMG%:*}" NEW_TAG="$${IMG##*:}" && \
+	printf 'resources:\n- ../../config/default\nimages:\n- name: controller\n  newName: %s\n  newTag: %s\n' \
+		"$$NEW_NAME" "$$NEW_TAG" > bin/deploy-overlay/kustomization.yaml && \
+	$(KUSTOMIZE) build bin/deploy-overlay | kubectl apply --server-side -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster.

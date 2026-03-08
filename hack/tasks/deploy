@@ -4,6 +4,19 @@
 
 IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
 
-cd config/manager && kustomize edit set image "controller=$IMG"
-cd - > /dev/null
-kustomize build config/default | kubectl apply -f -
+# Build manifests without mutating config/manager/kustomization.yaml.
+# Uses a temporary overlay under bin/ (gitignored) that sets the
+# controller image, leaving the checked-in kustomization untouched.
+overlay="bin/deploy-overlay"
+mkdir -p "$overlay"
+
+cat > "$overlay/kustomization.yaml" <<EOF
+resources:
+- ../../config/default
+images:
+- name: controller
+  newName: ${IMG%:*}
+  newTag: ${IMG##*:}
+EOF
+
+kustomize build "$overlay" | kubectl apply --server-side -f -
