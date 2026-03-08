@@ -1,9 +1,0 @@
-apiVersion: demo.example.com/v1alpha1
-kind: Widget
-metadata:
-  labels:
-    app.kubernetes.io/name: dynamic-watch-poc
-    app.kubernetes.io/managed-by: kustomize
-  name: widget-sample
-spec:
-  # TODO(user): Add fields here
