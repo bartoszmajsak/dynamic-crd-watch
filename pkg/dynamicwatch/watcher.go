@@ -73,9 +73,9 @@ func (s State) String() string {
 // internal state automatically - the caller should requeue.
 var ErrCacheInvalidated = errors.New("informer removed during operation")
 
-// LifecycleRequeue returns reconcile requests for all parent objects affected
+// RequeueParentsFn returns reconcile requests for all parent objects affected
 // by a CRD lifecycle change (appearance or removal).
-type LifecycleRequeue func(ctx context.Context) []reconcile.Request
+type RequeueParentsFn func(ctx context.Context) []reconcile.Request
 
 // WatchRegistrar is the subset of [controller.Controller] that a [Watcher]
 // needs to register dynamic watches at runtime. Accepting this narrow
@@ -90,7 +90,7 @@ type WatcherBuilder[T client.Object] struct {
 	mgr          ctrl.Manager
 	crdName      string
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
-	requeueAll   LifecycleRequeue
+	requeueAll   RequeueParentsFn
 }
 
 // For starts building a [Watcher] for an optional CRD.
@@ -116,7 +116,7 @@ func (b *WatcherBuilder[T]) EnqueueOnObjectChange(fn handler.TypedMapFunc[T, rec
 
 // EnqueueOnCRDChange sets the function that returns reconcile requests for all
 // parent objects affected when the CRD itself is installed or removed.
-func (b *WatcherBuilder[T]) EnqueueOnCRDChange(fn LifecycleRequeue) *WatcherBuilder[T] {
+func (b *WatcherBuilder[T]) EnqueueOnCRDChange(fn RequeueParentsFn) *WatcherBuilder[T] {
 	b.requeueAll = fn
 
 	return b
@@ -177,7 +177,7 @@ type Watcher[T client.Object] struct {
 	ctrl         WatchRegistrar
 	crdAvailable func(ctx context.Context) bool
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
-	requeueAll   LifecycleRequeue
+	requeueAll   RequeueParentsFn
 	newT         func() T
 	mu           sync.Mutex
 	active       bool
@@ -332,8 +332,8 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, obj client.Object) []recon
 		return nil
 	}
 
-	crdBeingRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
-	if crdBeingRemoved {
+	crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
+	if crdRemoved {
 		w.mu.Lock()
 		wasActive := w.active
 		w.active = false

@@ -56,7 +56,7 @@ func SetCRDAvailable[T client.Object](w *Watcher[T], fn func(context.Context) bo
 // SetRequeueAll replaces the lifecycle requeue function. Use this in tests
 // that need to verify whether onCRDChange triggers a requeue and with
 // what requests.
-func SetRequeueAll[T client.Object](w *Watcher[T], fn LifecycleRequeue) {
+func SetRequeueAll[T client.Object](w *Watcher[T], fn RequeueParentsFn) {
 	w.requeueAll = fn
 }
 
