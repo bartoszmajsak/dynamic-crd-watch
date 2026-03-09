@@ -109,11 +109,7 @@ func TestEnsure_BindNotCalled_ReturnsNotAvailable(t *testing.T) {
 func TestEnsure_AlreadyActive_ReturnsActive(t *testing.T) {
 	w := newTestWatcher(&fakeCache{}, &fakeController{})
 	dynamicwatch.SetActive(w, true)
-	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool {
-		t.Fatal("discovery should not be called when already active")
-
-		return false
-	})
+	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.Active {
@@ -133,7 +129,7 @@ func TestEnsure_CRDNotAvailable_ReturnsNotAvailable(t *testing.T) {
 func TestEnsure_CRDAvailable_WatchSucceeds_ReturnsJustRegistered(t *testing.T) {
 	fc := &fakeController{}
 	w := newTestWatcher(&fakeCache{}, fc)
-	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool { return true })
+	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.JustRegistered {
@@ -152,7 +148,7 @@ func TestEnsure_CRDAvailable_WatchSucceeds_ReturnsJustRegistered(t *testing.T) {
 func TestEnsure_CRDAvailable_WatchFails_ReturnsNotAvailable(t *testing.T) {
 	fc := &fakeController{watchErr: errors.New("watch failed")}
 	w := newTestWatcher(&fakeCache{}, fc)
-	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool { return true })
+	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.NotAvailable {
@@ -167,7 +163,7 @@ func TestEnsure_CRDAvailable_WatchFails_ReturnsNotAvailable(t *testing.T) {
 func TestEnsure_SecondCall_ReturnsActive(t *testing.T) {
 	fc := &fakeController{}
 	w := newTestWatcher(&fakeCache{}, fc)
-	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool { return true })
+	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.JustRegistered {
@@ -198,6 +194,7 @@ func TestGet_ErrResourceNotCached_ResetsState(t *testing.T) {
 	fc := &fakeCache{getErr: &cache.ErrResourceNotCached{}}
 	w := newTestWatcher(fc, &fakeController{})
 	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetCRDExists(w, true)
 
 	err := w.Get(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
 
@@ -207,6 +204,11 @@ func TestGet_ErrResourceNotCached_ResetsState(t *testing.T) {
 
 	if w.Available() {
 		t.Error("expected Available() to be false after cache invalidation")
+	}
+
+	// Verify crdExists was also reset - Ensure should return NotAvailable.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.NotAvailable {
+		t.Errorf("expected NotAvailable after cache invalidation, got %s", state)
 	}
 }
 
@@ -337,6 +339,43 @@ func TestSimulateCRDChange_CRDEstablished_KeepsWatch(t *testing.T) {
 	}
 }
 
+func TestSimulateCRDChange_CRDAlreadyKnown_SkipsRequeue(t *testing.T) {
+	fc := &fakeCache{}
+	requeueCount := 0
+	w := newTestWatcher(fc, &fakeController{})
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
+		requeueCount++
+
+		return []reconcile.Request{{}}
+	})
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
+			},
+		},
+	}
+
+	// Duplicate CRD event when already known - should not requeue.
+	requests := dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	if requeueCount != 0 {
+		t.Errorf("expected no requeue calls for already-known CRD, got %d", requeueCount)
+	}
+
+	if requests != nil {
+		t.Errorf("expected nil requests for already-known CRD, got %v", requests)
+	}
+
+	if !w.Available() {
+		t.Error("expected watch to remain active")
+	}
+}
+
 func TestSimulateCRDChange_WatchNotActive_SkipsRemovalAndRequeue(t *testing.T) {
 	fc := &fakeCache{}
 	requeueCalled := false
@@ -372,7 +411,7 @@ func TestSimulateCRDChange_WatchNotActive_SkipsRemovalAndRequeue(t *testing.T) {
 func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 	fc := &fakeController{}
 	w := newTestWatcher(&fakeCache{}, fc)
-	dynamicwatch.SetCRDAvailable(w, func(_ context.Context) bool { return true })
+	dynamicwatch.SetCRDExists(w, true)
 
 	var wg sync.WaitGroup
 	for range 10 {
@@ -384,6 +423,55 @@ func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 
 	if fc.WatchCallCount() != 1 {
 		t.Errorf("expected exactly 1 Watch call from 10 concurrent Ensure calls, got %d", fc.WatchCallCount())
+	}
+}
+
+func TestCRDAppearance_SetsCRDExists_EnsureRegisters(t *testing.T) {
+	fc := &fakeController{}
+	w := newTestWatcher(&fakeCache{}, fc)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	// Before CRD appears, Ensure should return NotAvailable.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.NotAvailable {
+		t.Fatalf("expected NotAvailable before CRD event, got %s", state)
+	}
+
+	// Simulate CRD established event.
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
+			},
+		},
+	}
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	// After CRD event, Ensure should register the watch.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.JustRegistered {
+		t.Errorf("expected JustRegistered after CRD event, got %s", state)
+	}
+}
+
+func TestCRDRemoval_ClearsCRDExists_EnsureReturnsNotAvailable(t *testing.T) {
+	fc := &fakeController{}
+	w := newTestWatcher(&fakeCache{}, fc)
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetActive(w, true)
+
+	// Simulate CRD removal.
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	// After removal, Ensure should return NotAvailable.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.NotAvailable {
+		t.Errorf("expected NotAvailable after CRD removal, got %s", state)
 	}
 }
 

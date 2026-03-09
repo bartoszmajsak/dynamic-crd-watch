@@ -285,8 +285,13 @@ func (r *WidgetReconciler) allWidgetsWithThemeRef(ctx context.Context) []reconci
 func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.recorder = mgr.GetEventRecorder("widget-controller")
 
-	var err error
+	crdCache, err := dynamicwatch.NewCRDCache(mgr)
+	if err != nil {
+		return fmt.Errorf("creating shared CRD cache: %w", err)
+	}
+
 	r.pluginWatch, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, pluginConfigCRDName).
+		WithCRDCache(crdCache).
 		EnqueueOnObjectChange(r.pluginConfigToWidgets).
 		EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
 		Build()
@@ -295,6 +300,7 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	r.themeWatch, err = dynamicwatch.For[*demov1alpha1.Theme](mgr, themeCRDName).
+		WithCRDCache(crdCache).
 		EnqueueOnObjectChange(r.themeToWidgets).
 		EnqueueOnCRDChange(r.allWidgetsWithThemeRef).
 		Build()

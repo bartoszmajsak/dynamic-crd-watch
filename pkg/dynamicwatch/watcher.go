@@ -29,7 +29,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -37,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -85,10 +85,49 @@ type WatchRegistrar interface {
 	Watch(src source.TypedSource[reconcile.Request]) error
 }
 
+// CRDCache is a shared cache for CustomResourceDefinition objects.
+// Create one per manager via [NewCRDCache] and pass it to all Watchers
+// via [WatcherBuilder.WithCRDCache]. This avoids one LIST/WATCH connection
+// per watcher - all watchers share a single CRD informer and filter
+// events client-side via name predicates.
+type CRDCache struct {
+	cache cache.Cache
+}
+
+// NewCRDCache creates a shared CRD cache and registers it with the manager.
+// The cache watches all CRDs (no field selector); each watcher adds its
+// own name predicate in [Watcher.Register].
+func NewCRDCache(mgr ctrl.Manager) (*CRDCache, error) {
+	if mgr == nil {
+		return nil, errors.New("dynamicwatch: manager is required")
+	}
+
+	c, err := cache.New(mgr.GetConfig(), cache.Options{
+		HTTPClient: mgr.GetHTTPClient(),
+		Scheme:     mgr.GetScheme(),
+		Mapper:     mgr.GetRESTMapper(),
+		ByObject: map[client.Object]cache.ByObject{
+			&apiextensionsv1.CustomResourceDefinition{}: {
+				Transform: stripCRDSpec,
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating shared CRD cache: %w", err)
+	}
+
+	if err := mgr.Add(c); err != nil {
+		return nil, fmt.Errorf("registering shared CRD cache: %w", err)
+	}
+
+	return &CRDCache{cache: c}, nil
+}
+
 // WatcherBuilder constructs a [Watcher] for an optional CRD using a fluent API.
 type WatcherBuilder[T client.Object] struct {
 	mgr          ctrl.Manager
 	crdName      string
+	crdCache     *CRDCache
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
 	requeueAll   RequeueParentsFn
 }
@@ -104,6 +143,25 @@ func For[T client.Object](mgr ctrl.Manager, crdName string) *WatcherBuilder[T] {
 		mgr:     mgr,
 		crdName: crdName,
 	}
+}
+
+// WithCRDCache sets a shared [CRDCache] for CRD lifecycle events. When set,
+// the watcher uses the shared cache instead of creating a per-watcher one.
+// Events are filtered client-side by CRD name via a predicate.
+//
+// Panics if c is nil - use a nil-safe constructor or omit the call entirely
+// to get the per-watcher cache fallback.
+//
+// If not called, [WatcherBuilder.Build] creates a dedicated cache with a
+// server-side field selector for backward compatibility.
+func (b *WatcherBuilder[T]) WithCRDCache(c *CRDCache) *WatcherBuilder[T] {
+	if c == nil {
+		panic("dynamicwatch: WithCRDCache called with nil CRDCache")
+	}
+
+	b.crdCache = c
+
+	return b
 }
 
 // EnqueueOnObjectChange sets the function that maps individual T events
@@ -148,27 +206,30 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		return nil, fmt.Errorf("deriving GVK for %s: %w", b.crdName, err)
 	}
 
-	dc, err := discovery.NewDiscoveryClientForConfigAndClient(b.mgr.GetConfig(), b.mgr.GetHTTPClient())
-	if err != nil {
-		return nil, fmt.Errorf("creating discovery client for %s: %w", b.crdName, err)
-	}
-
-	crdCache, err := cache.New(b.mgr.GetConfig(), cache.Options{
-		HTTPClient: b.mgr.GetHTTPClient(),
-		Scheme:     b.mgr.GetScheme(),
-		Mapper:     b.mgr.GetRESTMapper(),
-		ByObject: map[client.Object]cache.ByObject{
-			&apiextensionsv1.CustomResourceDefinition{}: {
-				Field: fields.OneTermEqualSelector("metadata.name", b.crdName),
+	var crdCache cache.Cache
+	if b.crdCache != nil {
+		crdCache = b.crdCache.cache
+	} else {
+		// Per-watcher cache with server-side field selector (backward compat).
+		c, cacheErr := cache.New(b.mgr.GetConfig(), cache.Options{
+			HTTPClient: b.mgr.GetHTTPClient(),
+			Scheme:     b.mgr.GetScheme(),
+			Mapper:     b.mgr.GetRESTMapper(),
+			ByObject: map[client.Object]cache.ByObject{
+				&apiextensionsv1.CustomResourceDefinition{}: {
+					Field: fields.OneTermEqualSelector("metadata.name", b.crdName),
+				},
 			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating CRD cache for %s: %w", b.crdName, err)
-	}
+		})
+		if cacheErr != nil {
+			return nil, fmt.Errorf("creating CRD cache for %s: %w", b.crdName, cacheErr)
+		}
 
-	if err := b.mgr.Add(crdCache); err != nil {
-		return nil, fmt.Errorf("registering CRD cache for %s: %w", b.crdName, err)
+		if addErr := b.mgr.Add(c); addErr != nil {
+			return nil, fmt.Errorf("registering CRD cache for %s: %w", b.crdName, addErr)
+		}
+
+		crdCache = c
 	}
 
 	mainCache := b.mgr.GetCache()
@@ -199,8 +260,6 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		newT:         newT,
 	}
 
-	w.crdAvailable = crdChecker(dc, gvk)
-
 	return w, nil
 }
 
@@ -213,22 +272,24 @@ type Watcher[T client.Object] struct {
 	cache        cache.Cache
 	crdCache     cache.Cache
 	ctrl         WatchRegistrar
-	crdAvailable func(ctx context.Context) bool
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
 	requeueAll   RequeueParentsFn
 	newT         func() T
 	mu           sync.Mutex
 	active       bool
+	crdExists    bool
 }
 
-// Register adds a CRD watch to the controller builder using the watcher's
-// dedicated cache. Each Watcher gets its own cache filtered by metadata.name
-// via a server-side field selector, so multiple Watchers can independently
-// track different CRDs without interfering with each other.
+// Register adds a CRD watch to the controller builder. Events are filtered
+// to this watcher's CRD name via a predicate. When using a shared [CRDCache]
+// the predicate provides client-side filtering; with a per-watcher cache
+// (no [WatcherBuilder.WithCRDCache]) the server-side field selector already
+// filters, but the predicate is harmless and keeps the code path uniform.
 // Must be called before [builder.Builder.Build].
 func (w *Watcher[T]) Register(b *builder.Builder) {
 	b.WatchesRawSource(source.Kind(w.crdCache, &apiextensionsv1.CustomResourceDefinition{},
 		handler.TypedEnqueueRequestsFromMapFunc(w.onCRDChange),
+		crdNamePredicate(w.crdName),
 	))
 }
 
@@ -255,8 +316,8 @@ func (w *Watcher[T]) Bind(ctrl WatchRegistrar) {
 }
 
 // Ensure checks CRD availability and registers the watch if needed.
-// Uses a check-lock-check pattern to avoid holding the mutex during
-// the discovery API call.
+// CRD availability is tracked via an event-driven flag set by
+// [Watcher.onCRDChange] - no discovery API calls are made.
 //
 // The mutex is held during [WatchRegistrar.Watch] to prevent double
 // registration from concurrent reconciles. This is safe because
@@ -264,12 +325,6 @@ func (w *Watcher[T]) Bind(ctrl WatchRegistrar) {
 // the controller's internal list). If a custom WatchRegistrar blocks,
 // it will delay concurrent [Watcher.Get], [Watcher.Available], and
 // [Watcher.onCRDChange] calls until registration completes.
-//
-// There is an inherent TOCTOU window between the discovery check and
-// watch registration - the CRD could be removed in that interval.
-// This is safe because [Watcher.onCRDChange] will fire for the removal,
-// clean up the informer via [cache.Cache.RemoveInformer], and reset
-// the active flag. The next reconcile will see [NotAvailable].
 func (w *Watcher[T]) Ensure(ctx context.Context) State {
 	if w.ctrl == nil {
 		logf.FromContext(ctx).Error(nil, "Bind() not called, cannot register watch", "crd", w.crdName)
@@ -278,22 +333,14 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 	}
 
 	w.mu.Lock()
-	if w.active {
-		w.mu.Unlock()
-
-		return Active
-	}
-	w.mu.Unlock()
-
-	if !w.crdAvailable(ctx) {
-		return NotAvailable
-	}
-
-	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.active {
 		return Active
+	}
+
+	if !w.crdExists {
+		return NotAvailable
 	}
 
 	log := logf.FromContext(ctx)
@@ -326,6 +373,11 @@ func (w *Watcher[T]) Get(ctx context.Context, key client.ObjectKey, obj T) error
 		if errors.As(err, &notCached) {
 			w.mu.Lock()
 			w.active = false
+			// Reset crdExists because ErrResourceNotCached only occurs after
+			// onCRDChange called RemoveInformer due to CRD removal. A subsequent
+			// CRD re-installation will trigger a new onCRDChange event that sets
+			// crdExists=true again.
+			w.crdExists = false
 			w.mu.Unlock()
 
 			return ErrCacheInvalidated
@@ -371,6 +423,7 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 		w.mu.Lock()
 		wasActive := w.active
 		w.active = false
+		w.crdExists = false
 		w.mu.Unlock()
 
 		if wasActive {
@@ -387,33 +440,40 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 			return nil
 		}
 	} else {
+		w.mu.Lock()
+		alreadyKnown := w.crdExists
+		w.crdExists = true
+		w.mu.Unlock()
+
+		if alreadyKnown {
+			return nil
+		}
+
 		log.Info("CRD detected, will requeue affected objects", "crd", w.crdName)
 	}
 
 	return w.requeueAll(ctx)
 }
 
-// crdChecker returns a function that checks CRD availability via the
-// discovery API. Uses an uncached client to avoid the ~10min TTL of
-// the cached discovery client.
-func crdChecker(dc *discovery.DiscoveryClient, gvk schema.GroupVersionKind) func(ctx context.Context) bool {
-	return func(ctx context.Context) bool {
-		resources, err := dc.ServerResourcesForGroupVersion(gvk.GroupVersion().String())
-		if err != nil {
-			logf.FromContext(ctx).V(1).Info("API group not available via discovery",
-				"groupVersion", gvk.GroupVersion().String(), "error", err)
+// crdNamePredicate returns a predicate that matches CRDs by metadata.name.
+// Used to filter shared CRD cache events to the specific CRD this watcher
+// is tracking.
+func crdNamePredicate(name string) predicate.TypedPredicate[*apiextensionsv1.CustomResourceDefinition] {
+	return predicate.NewTypedPredicateFuncs(func(crd *apiextensionsv1.CustomResourceDefinition) bool {
+		return crd.Name == name
+	})
+}
 
-			return false
-		}
-
-		for i := range resources.APIResources {
-			if resources.APIResources[i].Kind == gvk.Kind {
-				return true
-			}
-		}
-
-		return false
+// stripCRDSpec is a cache transform that removes the spec from CRD objects
+// before they are stored in the informer's in-memory store. CRD specs contain
+// large OpenAPI schemas (validation, versions) that we never read - we only
+// need metadata (name, deletionTimestamp) and status (Established condition).
+func stripCRDSpec(obj any) (any, error) {
+	if crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+		crd.Spec = apiextensionsv1.CustomResourceDefinitionSpec{}
 	}
+
+	return obj, nil
 }
 
 // newInstance creates a zero-value instance of T using reflection.

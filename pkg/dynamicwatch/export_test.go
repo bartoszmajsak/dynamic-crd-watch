@@ -3,8 +3,8 @@
 // `go test`, so none of this leaks into production binaries.
 //
 // The watcher_test.go file is a black-box test (package dynamicwatch_test)
-// that imports these helpers to exercise internal behavior - like injecting
-// a fake CRD availability check or simulating a CRD lifecycle event -
+// that imports these helpers to exercise internal behavior - like setting
+// the crdExists flag or simulating a CRD lifecycle event -
 // without coupling tests to the struct layout.
 //
 // This is the standard Go "export_test.go" pattern used by the stdlib
@@ -22,12 +22,12 @@ import (
 
 // NewTestWatcher creates a Watcher for unit testing without requiring a
 // ctrl.Manager. In production, Build() derives the GVK from the scheme,
-// creates a discovery client, etc. - none of which is needed (or desirable)
+// creates a CRD cache, etc. - none of which is needed (or desirable)
 // in a unit test.
 //
 // Only the essential dependencies (cache, controller) are parameters.
 // GVK, object mapper, requeue function, and newT are defaulted to safe
-// no-ops. Use SetCRDAvailable and SetRequeueAll to override behavior
+// no-ops. Use SetCRDExists and SetRequeueAll to override behavior
 // for specific test scenarios.
 //
 // The ctrl parameter may be nil to test the "Bind not called" code path.
@@ -40,17 +40,16 @@ func NewTestWatcher[T client.Object](
 		crdName:      crdName,
 		cache:        c,
 		ctrl:         ctrl,
-		crdAvailable: func(_ context.Context) bool { return false },
 		objectMapper: func(_ context.Context, _ T) []reconcile.Request { return nil },
 		requeueAll:   func(_ context.Context) []reconcile.Request { return nil },
 		newT:         newInstance[T],
 	}
 }
 
-// SetCRDAvailable replaces the discovery-based CRD check with fn.
-// This lets tests control what Ensure() sees without hitting an API server.
-func SetCRDAvailable[T client.Object](w *Watcher[T], fn func(context.Context) bool) {
-	w.crdAvailable = fn
+// SetCRDExists sets the event-driven CRD existence flag.
+// This lets tests control what Ensure() sees without a running CRD cache.
+func SetCRDExists[T client.Object](w *Watcher[T], exists bool) {
+	w.crdExists = exists
 }
 
 // SetRequeueAll replaces the lifecycle requeue function. Use this in tests
