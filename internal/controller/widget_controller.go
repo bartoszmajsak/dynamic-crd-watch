@@ -25,6 +25,9 @@ const (
 
 	themeCRDName  = "themes.demo.example.com"
 	themeRefField = "spec.themeRef"
+
+	hasPluginRefField = "has-pluginRef"
+	hasThemeRefField  = "has-themeRef"
 )
 
 // WidgetReconciler reconciles a Widget object.
@@ -217,19 +220,17 @@ func (r *WidgetReconciler) allWidgetsWithPluginRef(ctx context.Context) []reconc
 	log := logf.FromContext(ctx)
 
 	var widgets demov1alpha1.WidgetList
-	if err := r.List(ctx, &widgets); err != nil {
+	if err := r.List(ctx, &widgets, client.MatchingFields{hasPluginRefField: "true"}); err != nil {
 		log.Error(err, "Failed to list Widgets for requeue")
 
 		return nil
 	}
 
-	var requests []reconcile.Request
+	requests := make([]reconcile.Request, 0, len(widgets.Items))
 	for i := range widgets.Items {
-		if widgets.Items[i].Spec.PluginRef != "" {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: client.ObjectKeyFromObject(&widgets.Items[i]),
-			})
-		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&widgets.Items[i]),
+		})
 	}
 
 	return requests
@@ -263,19 +264,17 @@ func (r *WidgetReconciler) allWidgetsWithThemeRef(ctx context.Context) []reconci
 	log := logf.FromContext(ctx)
 
 	var widgets demov1alpha1.WidgetList
-	if err := r.List(ctx, &widgets); err != nil {
+	if err := r.List(ctx, &widgets, client.MatchingFields{hasThemeRefField: "true"}); err != nil {
 		log.Error(err, "Failed to list Widgets for requeue")
 
 		return nil
 	}
 
-	var requests []reconcile.Request
+	requests := make([]reconcile.Request, 0, len(widgets.Items))
 	for i := range widgets.Items {
-		if widgets.Items[i].Spec.ThemeRef != "" {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: client.ObjectKeyFromObject(&widgets.Items[i]),
-			})
-		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&widgets.Items[i]),
+		})
 	}
 
 	return requests
@@ -338,6 +337,38 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	); err != nil {
 		return fmt.Errorf("indexing %s: %w", themeRefField, err)
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&demov1alpha1.Widget{},
+		hasPluginRefField,
+		func(obj client.Object) []string {
+			w, ok := obj.(*demov1alpha1.Widget)
+			if !ok || w.Spec.PluginRef == "" {
+				return nil
+			}
+
+			return []string{"true"}
+		},
+	); err != nil {
+		return fmt.Errorf("indexing %s: %w", hasPluginRefField, err)
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&demov1alpha1.Widget{},
+		hasThemeRefField,
+		func(obj client.Object) []string {
+			w, ok := obj.(*demov1alpha1.Widget)
+			if !ok || w.Spec.ThemeRef == "" {
+				return nil
+			}
+
+			return []string{"true"}
+		},
+	); err != nil {
+		return fmt.Errorf("indexing %s: %w", hasThemeRefField, err)
 	}
 
 	b := ctrl.NewControllerManagedBy(mgr).
