@@ -171,10 +171,28 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		return nil, fmt.Errorf("registering CRD cache for %s: %w", b.crdName, err)
 	}
 
+	mainCache := b.mgr.GetCache()
+
+	// Verify that the manager's cache has ReaderFailOnMissingInformer set.
+	// Without it, a Get after RemoveInformer silently creates a new informer
+	// that blocks on WaitForCacheSync forever instead of returning ErrResourceNotCached.
+	probeCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	probeErr := mainCache.Get(probeCtx, client.ObjectKey{Namespace: "__probe__", Name: "__probe__"}, newT())
+
+	var notCached *cache.ErrResourceNotCached
+	if !errors.As(probeErr, &notCached) {
+		return nil, fmt.Errorf(
+			"dynamicwatch: manager cache must have ReaderFailOnMissingInformer: true; "+
+				"without it, reads after informer removal will deadlock "+
+				"(probe returned: %v)", probeErr)
+	}
+
 	w := &Watcher[T]{
 		crdName:      b.crdName,
 		gvk:          gvk,
-		cache:        b.mgr.GetCache(),
+		cache:        mainCache,
 		crdCache:     crdCache,
 		objectMapper: b.objectMapper,
 		requeueAll:   b.requeueAll,
