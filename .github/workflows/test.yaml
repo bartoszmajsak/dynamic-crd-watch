@@ -26,11 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
+        
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: dynamic-crd-watch
+        run: |
+          mise kind:create
 
       - uses: docker/setup-buildx-action@v3
 
@@ -47,7 +47,7 @@ jobs:
         run: kind load docker-image $IMG --name dynamic-crd-watch
 
       - name: Deploy controller
-        run: IMG=$IMG mise run deploy
+        run: IMG=$IMG mise deploy
 
       - name: Wait for controller readiness
         run: |
@@ -57,5 +57,4 @@ jobs:
 
       - name: Run e2e tests (real cluster, deployed manager)
         run: |
-          USE_EXISTING_CLUSTER=true DEPLOYED_MANAGER=true \
-            go test -v -count=1 -timeout 10m ./internal/controller/...
+          mise test:e2e

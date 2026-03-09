@@ -6,6 +6,7 @@ go = { version = "1.25", postinstall = "go install sigs.k8s.io/controller-runtim
 kustomize = "5.8.1"
 kubectl = "1.35.2"
 docker-cli = "29.3"
+kind = "0.31.0"
 
 [task_config]
 includes = ["hack/tasks"]
