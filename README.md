@@ -6,12 +6,13 @@ This project shows how to handle both cases cleanly with controller-runtime, no 
 
 ## How it works
 
-The setup is intentionally simple - two CRDs:
+The setup is intentionally simple - three CRDs:
 
-- **Widget** (always installed) - has an optional `.spec.pluginRef` field
-- **PluginConfig** (optional) - may or may not exist at any point
+- **Widget** (always installed) - has optional `.spec.pluginRef` and `.spec.themeRef` fields
+- **PluginConfig** (optional) - provides a `setting` value
+- **Theme** (optional) - provides a `colorScheme` value
 
-A single controller reconciles Widgets. When `pluginRef` is set and the PluginConfig CRD exists, it reads the referenced PluginConfig and reports `PluginReady: True`. When the CRD is absent - `PluginReady: False`, reason `PluginCRDNotAvailable`.
+A single controller reconciles Widgets. When a ref is set and the corresponding CRD exists, it reads the referenced resource and reports the condition as `True`. When the CRD is absent - `False`, reason `CRDNotAvailable`.
 
 ```
 Startup:
@@ -38,8 +39,8 @@ Wire the watcher in `SetupWithManager` using a fluent builder that mirrors contr
 func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
     // 1. Build the watcher - GVK is derived from the scheme automatically
     r.optionalWatch, err = dynamicwatch.For[*v1alpha1.OptionalResource](mgr, "optionalresources.example.com").
-        EnqueueOnObjectChange(r.mapOptionalToParent).   // when an OptionalResource changes
-        EnqueueOnCRDChange(r.allAffectedParents).        // when the CRD itself appears/disappears
+        WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.mapOptionalToParent)).
+        EnqueueOnCRDChange(r.allAffectedParents).
         Build()
 
     // 2. Wire it up - Watcher implements source.SyncingSource
@@ -49,6 +50,54 @@ func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
         WatchesRawSource(r.optionalWatch).
         Complete(r)
 }
+```
+
+The two callbacks answer different questions:
+
+- **`WithEventHandler`** - "an OptionalResource changed, which parent objects need to reconcile?" Typically a field index lookup on the parent's ref field:
+
+```go
+// Maps an OptionalResource event to the parent objects that reference it.
+func (r *MyReconciler) mapOptionalToParent(ctx context.Context, obj *v1alpha1.OptionalResource) []reconcile.Request {
+    var parents v1alpha1.MyResourceList
+    _ = r.List(ctx, &parents, client.MatchingFields{"spec.optionalRef": obj.GetName()})
+
+    requests := make([]reconcile.Request, 0, len(parents.Items))
+    for i := range parents.Items {
+        requests = append(requests, reconcile.Request{
+            NamespacedName: client.ObjectKeyFromObject(&parents.Items[i]),
+        })
+    }
+    return requests
+}
+```
+
+- **`EnqueueOnCRDChange`** - "the CRD itself appeared or disappeared, which parent objects should re-evaluate?" Usually all parents that could reference this optional type:
+
+```go
+// Returns all parent objects that have a ref set, so they can
+// re-evaluate their condition after a CRD lifecycle change.
+func (r *MyReconciler) allAffectedParents(ctx context.Context) []reconcile.Request {
+    var parents v1alpha1.MyResourceList
+    _ = r.List(ctx, &parents, client.MatchingFields{"has-optionalRef": "true"})
+
+    requests := make([]reconcile.Request, 0, len(parents.Items))
+    for i := range parents.Items {
+        requests = append(requests, reconcile.Request{
+            NamespacedName: client.ObjectKeyFromObject(&parents.Items[i]),
+        })
+    }
+    return requests
+}
+```
+
+For owned resources (the dynamic equivalent of `builder.Owns()`), use `EnqueueForOwner` instead of `WithEventHandler` - it uses owner references so no mapper is needed:
+
+```go
+r.ownedWatch, err = dynamicwatch.For[*v1alpha1.OwnedResource](mgr, "ownedresources.example.com").
+    EnqueueForOwner(&v1alpha1.MyResource{}, handler.OnlyControllerOwner()).
+    EnqueueOnCRDChange(r.allAffectedParents).
+    Build()
 ```
 
 The Watcher implements `source.SyncingSource`, so it plugs directly into the builder via `WatchesRawSource`. The controller framework calls `Start` and `WaitForSync` automatically - no manual wiring needed.
@@ -90,25 +139,17 @@ func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 
 ### Prerequisites
 
-Your cache **must** have `ReaderFailOnMissingInformer: true`:
-
-```go
-mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-    Cache: cache.Options{
-        ReaderFailOnMissingInformer: true,
-    },
-})
-```
-
-Without it, a `Get` after informer removal silently creates a new informer that blocks forever. See ["Things that will bite you"](#readerfailonmissinginformer-is-not-optional) below.
+None on the manager side. Each Watcher creates its own private cache with `ReaderFailOnMissingInformer: true` internally - you don't need to configure anything special on your manager cache.
 
 ## Things that will bite you
 
 When developing this PoC I learned the following:
 
-### `ReaderFailOnMissingInformer` is not optional
+### `ReaderFailOnMissingInformer` is critical (but handled for you)
 
-Without `ReaderFailOnMissingInformer: true` on the cache, a `r.Get()` call after `RemoveInformer` silently creates a *new* informer for the removed GVK. That informer tries to list/watch against a non-existent API and blocks on `WaitForCacheSync` forever. Your controller is now a very expensive no-op.
+Without `ReaderFailOnMissingInformer: true` on a cache, a `Get()` call after `RemoveInformer` silently creates a *new* informer for the removed GVK. That informer tries to list/watch against a non-existent API and blocks on `WaitForCacheSync` forever. Your controller is now a very expensive no-op.
+
+The `dynamicwatch` package sets this flag on each Watcher's private cache automatically. If you're building something similar from scratch, don't forget it.
 
 ### CRD deletion generates spurious events
 
@@ -120,11 +161,9 @@ Check both:
 crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 ```
 
-### The `RemoveInformer` / `r.Get` race
+### The `RemoveInformer` / `Get` race
 
-If `RemoveInformer` fires between `ensurePluginWatch()` returning `true` and `r.Get(PluginConfig)`, the cache returns `ErrResourceNotCached`. You must catch this, reset the watch flag, and requeue. Miss it and you're back to a deadlocked controller.
-
-Otherwise, your controller can get deadlocked.
+If `RemoveInformer` fires between `Ensure()` returning `Ready` and `Watcher.Get()`, the cache returns `ErrResourceNotCached`. The Watcher catches this automatically and returns `ErrCacheInvalidated` - the caller just needs to requeue. Miss it and you're back to a deadlocked controller.
 
 ## Quick start
 
