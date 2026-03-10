@@ -15,6 +15,7 @@ import (
 	"context"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -25,25 +26,29 @@ import (
 // creates a CRD cache, etc. - none of which is needed (or desirable)
 // in a unit test.
 //
-// Only the essential dependencies (cache, controller) are parameters.
-// GVK, object mapper, requeue function, and newT are defaulted to safe
-// no-ops. Use SetCRDExists and SetRequeueAll to override behavior
+// Only the essential dependency (cache) is a parameter. GVK, object mapper,
+// requeue function, and newT are defaulted to safe no-ops. Use
+// SetCRDExists, SetRequeueAll, and SetStarted to override behavior
 // for specific test scenarios.
-//
-// The ctrl parameter may be nil to test the "Bind not called" code path.
 func NewTestWatcher[T client.Object](
 	crdName string,
 	c cache.Cache,
-	ctrl WatchRegistrar,
 ) *Watcher[T] {
 	return &Watcher[T]{
 		crdName:      crdName,
 		cache:        c,
-		ctrl:         ctrl,
 		objectMapper: func(_ context.Context, _ T) []reconcile.Request { return nil },
 		requeueAll:   func(_ context.Context) []reconcile.Request { return nil },
 		newT:         newInstance[T],
 	}
+}
+
+// SetStarted simulates the post-Start state by setting the queue and
+// startCtx fields. This is the equivalent of the controller framework
+// calling Start on the source.
+func SetStarted[T client.Object](w *Watcher[T], ctx context.Context) {
+	w.startCtx = ctx
+	w.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 }
 
 // SetCRDExists sets the event-driven CRD existence flag.

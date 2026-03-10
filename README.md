@@ -42,22 +42,16 @@ func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
         EnqueueOnCRDChange(r.allAffectedParents).        // when the CRD itself appears/disappears
         Build()
 
-    b := ctrl.NewControllerManagedBy(mgr).
+    // 2. Wire it up - Watcher implements source.SyncingSource
+    return ctrl.NewControllerManagedBy(mgr).
         For(&v1alpha1.MyResource{}).
-        Named("my-controller")
-
-    // 2. Register - adds a CRD watch to detect install/removal
-    r.optionalWatch.Register(b)
-
-    // 3. Build + Bind - connects the watcher to the controller
-    c, err := b.Build(r)
-    r.optionalWatch.Bind(c)
-
-    return nil
+        Named("my-controller").
+        WatchesRawSource(r.optionalWatch).
+        Complete(r)
 }
 ```
 
-The three-step `Build` / `Register` / `Bind` dance exists because controller-runtime's builder doesn't expose the `controller.Controller` until after `Build()`, but the CRD watch must be registered *before* `Build()`. There's no way around this without wrapping the builder.
+The Watcher implements `source.SyncingSource`, so it plugs directly into the builder via `WatchesRawSource`. The controller framework calls `Start` and `WaitForSync` automatically - no manual wiring needed.
 
 ### Reconcile loop
 

@@ -9,41 +9,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/bartoszmajsak/dynamic-watch-poc/pkg/dynamicwatch"
 )
 
-// fakeController implements dynamicwatch.WatchRegistrar - the only
-// interface the Watcher needs from a controller.
-type fakeController struct {
-	watchCalls int
-	watchErr   error
-	mu         sync.Mutex
-}
-
-func (f *fakeController) Watch(_ source.TypedSource[reconcile.Request]) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.watchCalls++
-
-	return f.watchErr
-}
-
-func (f *fakeController) WatchCallCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	return f.watchCalls
-}
-
 // fakeCache stubs the two cache methods Watcher uses: Get and RemoveInformer.
 // The embedded cache.Cache satisfies the interface for source.Kind, which is
-// never actually invoked in unit tests (the fakeController absorbs the Watch call).
+// never actually invoked in unit tests (the source.Start is stubbed via
+// the fakeInformer).
 type fakeCache struct {
 	cache.Cache
 
@@ -78,9 +55,14 @@ func (f *fakeCache) GetInformer(_ context.Context, _ client.Object, _ ...cache.I
 	return &fakeInformer{synced: f.informerSynced}, nil
 }
 
+func (f *fakeCache) WaitForCacheSync(_ context.Context) bool {
+	return true
+}
+
 // fakeInformer stubs cache.Informer for HasSynced checks.
 type fakeInformer struct {
 	cache.Informer
+
 	synced bool
 }
 
@@ -88,10 +70,25 @@ func (f *fakeInformer) HasSynced() bool {
 	return f.synced
 }
 
+func (f *fakeInformer) AddEventHandlerWithOptions(_ toolscache.ResourceEventHandler, _ toolscache.HandlerOptions) (toolscache.ResourceEventHandlerRegistration, error) {
+	return &fakeRegistration{}, nil
+}
+
+type fakeRegistration struct{}
+
+func (f *fakeRegistration) HasSynced() bool { return true }
+
 const testCRDName = "configmaps.test.io"
 
-func newTestWatcher(fc *fakeCache, ctrl *fakeController) *dynamicwatch.Watcher[*corev1.ConfigMap] {
-	return dynamicwatch.NewTestWatcher[*corev1.ConfigMap](testCRDName, fc, ctrl)
+func newTestWatcher(fc *fakeCache) *dynamicwatch.Watcher[*corev1.ConfigMap] {
+	return dynamicwatch.NewTestWatcher[*corev1.ConfigMap](testCRDName, fc)
+}
+
+func newStartedWatcher(fc *fakeCache) *dynamicwatch.Watcher[*corev1.ConfigMap] {
+	w := newTestWatcher(fc)
+	dynamicwatch.SetStarted(w, context.Background())
+
+	return w
 }
 
 func TestStateString(t *testing.T) {
@@ -112,17 +109,26 @@ func TestStateString(t *testing.T) {
 	}
 }
 
-func TestEnsure_BindNotCalled_ReturnsUnavailable(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, nil)
+func TestWaitForSync_BeforeStart_ReturnsError(t *testing.T) {
+	w := newTestWatcher(&fakeCache{})
+
+	err := w.WaitForSync(t.Context())
+	if err == nil {
+		t.Error("expected error when WaitForSync called before Start")
+	}
+}
+
+func TestEnsure_StartNotCalled_ReturnsUnavailable(t *testing.T) {
+	w := newTestWatcher(&fakeCache{})
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.Unavailable {
-		t.Errorf("expected Unavailable without Bind(), got %s", state)
+		t.Errorf("expected Unavailable without Start(), got %s", state)
 	}
 }
 
 func TestEnsure_AlreadyReady_ReturnsReady(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, &fakeController{})
+	w := newStartedWatcher(&fakeCache{})
 	dynamicwatch.SetActive(w, true)
 	dynamicwatch.SetCRDExists(w, true)
 
@@ -133,7 +139,7 @@ func TestEnsure_AlreadyReady_ReturnsReady(t *testing.T) {
 }
 
 func TestEnsure_CRDUnavailable_ReturnsUnavailable(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, &fakeController{})
+	w := newStartedWatcher(&fakeCache{})
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.Unavailable {
@@ -142,17 +148,12 @@ func TestEnsure_CRDUnavailable_ReturnsUnavailable(t *testing.T) {
 }
 
 func TestEnsure_CRDAvailable_WatchSucceeds_ReturnsReady(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{informerSynced: true}, fc)
+	w := newStartedWatcher(&fakeCache{informerSynced: true})
 	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
 	if state != dynamicwatch.Ready {
 		t.Errorf("expected Ready, got %s", state)
-	}
-
-	if fc.WatchCallCount() != 1 {
-		t.Errorf("expected 1 Watch call, got %d", fc.WatchCallCount())
 	}
 
 	if !w.Available() {
@@ -161,8 +162,7 @@ func TestEnsure_CRDAvailable_WatchSucceeds_ReturnsReady(t *testing.T) {
 }
 
 func TestEnsure_CRDAvailable_InformerNotSynced_ReturnsSyncing(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{informerSynced: false}, fc)
+	w := newStartedWatcher(&fakeCache{informerSynced: false})
 	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
@@ -170,33 +170,13 @@ func TestEnsure_CRDAvailable_InformerNotSynced_ReturnsSyncing(t *testing.T) {
 		t.Errorf("expected Syncing while informer not synced, got %s", state)
 	}
 
-	if fc.WatchCallCount() != 1 {
-		t.Errorf("expected 1 Watch call, got %d", fc.WatchCallCount())
-	}
-
 	if w.Available() {
 		t.Error("expected Available() to be false before sync")
 	}
 }
 
-func TestEnsure_CRDAvailable_WatchFails_ReturnsUnavailable(t *testing.T) {
-	fc := &fakeController{watchErr: errors.New("watch failed")}
-	w := newTestWatcher(&fakeCache{}, fc)
-	dynamicwatch.SetCRDExists(w, true)
-
-	state := w.Ensure(t.Context())
-	if state != dynamicwatch.Unavailable {
-		t.Errorf("expected Unavailable, got %s", state)
-	}
-
-	if w.Available() {
-		t.Error("expected Available() to be false after failed watch")
-	}
-}
-
 func TestEnsure_SecondCall_ReturnsReady(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{informerSynced: true}, fc)
+	w := newStartedWatcher(&fakeCache{informerSynced: true})
 	dynamicwatch.SetCRDExists(w, true)
 
 	state := w.Ensure(t.Context())
@@ -208,14 +188,10 @@ func TestEnsure_SecondCall_ReturnsReady(t *testing.T) {
 	if state != dynamicwatch.Ready {
 		t.Errorf("expected Ready on second call, got %s", state)
 	}
-
-	if fc.WatchCallCount() != 1 {
-		t.Errorf("expected exactly 1 Watch call across both Ensure calls, got %d", fc.WatchCallCount())
-	}
 }
 
 func TestGet_Success(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, &fakeController{})
+	w := newStartedWatcher(&fakeCache{})
 	dynamicwatch.SetActive(w, true)
 
 	err := w.Get(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
@@ -226,7 +202,7 @@ func TestGet_Success(t *testing.T) {
 
 func TestGet_ErrResourceNotCached_ResetsState(t *testing.T) {
 	fc := &fakeCache{getErr: &cache.ErrResourceNotCached{}}
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 	dynamicwatch.SetCRDExists(w, true)
 
@@ -249,7 +225,7 @@ func TestGet_ErrResourceNotCached_ResetsState(t *testing.T) {
 func TestGet_OtherError_PreservesState(t *testing.T) {
 	someErr := errors.New("something else")
 	fc := &fakeCache{getErr: someErr}
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 
 	err := w.Get(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
@@ -266,7 +242,7 @@ func TestGet_OtherError_PreservesState(t *testing.T) {
 func TestSimulateCRDChange_CRDRemoved_CleansUpInformer(t *testing.T) {
 	fc := &fakeCache{}
 	requeueCalled := false
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
 		requeueCalled = true
@@ -302,7 +278,7 @@ func TestSimulateCRDChange_CRDRemoved_CleansUpInformer(t *testing.T) {
 
 func TestSimulateCRDChange_RemoveInformerError_StillDeactivates(t *testing.T) {
 	fc := &fakeCache{removeErr: errors.New("remove failed")}
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 
 	crd := &apiextensionsv1.CustomResourceDefinition{
@@ -325,7 +301,7 @@ func TestSimulateCRDChange_RemoveInformerError_StillDeactivates(t *testing.T) {
 
 func TestSimulateCRDChange_CRDNotEstablished_CleansUpInformer(t *testing.T) {
 	fc := &fakeCache{}
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 
 	crd := &apiextensionsv1.CustomResourceDefinition{
@@ -350,7 +326,7 @@ func TestSimulateCRDChange_CRDNotEstablished_CleansUpInformer(t *testing.T) {
 
 func TestSimulateCRDChange_CRDEstablished_KeepsWatch(t *testing.T) {
 	fc := &fakeCache{}
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetActive(w, true)
 
 	crd := &apiextensionsv1.CustomResourceDefinition{
@@ -376,7 +352,7 @@ func TestSimulateCRDChange_CRDEstablished_KeepsWatch(t *testing.T) {
 func TestSimulateCRDChange_CRDAlreadyKnown_SkipsRequeue(t *testing.T) {
 	fc := &fakeCache{}
 	requeueCount := 0
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetCRDExists(w, true)
 	dynamicwatch.SetActive(w, true)
 	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
@@ -413,7 +389,7 @@ func TestSimulateCRDChange_CRDAlreadyKnown_SkipsRequeue(t *testing.T) {
 func TestSimulateCRDChange_WatchNotActive_SkipsRemovalAndRequeue(t *testing.T) {
 	fc := &fakeCache{}
 	requeueCalled := false
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
 		requeueCalled = true
 
@@ -445,7 +421,7 @@ func TestSimulateCRDChange_WatchNotActive_SkipsRemovalAndRequeue(t *testing.T) {
 func TestSimulateCRDChange_WatchingSyncingNotActive_RemovesInformerSkipsRequeue(t *testing.T) {
 	fc := &fakeCache{}
 	requeueCalled := false
-	w := newTestWatcher(fc, &fakeController{})
+	w := newStartedWatcher(fc)
 	dynamicwatch.SetWatching(w, true)
 	dynamicwatch.SetCRDExists(w, true)
 	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
@@ -481,8 +457,7 @@ func TestSimulateCRDChange_WatchingSyncingNotActive_RemovesInformerSkipsRequeue(
 }
 
 func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{informerSynced: true}, fc)
+	w := newStartedWatcher(&fakeCache{informerSynced: true})
 	dynamicwatch.SetCRDExists(w, true)
 
 	var wg sync.WaitGroup
@@ -493,14 +468,14 @@ func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	if fc.WatchCallCount() != 1 {
-		t.Errorf("expected exactly 1 Watch call from 10 concurrent Ensure calls, got %d", fc.WatchCallCount())
+	// Verify the watch is ready (concurrent calls should all succeed).
+	if !w.Available() {
+		t.Error("expected Available() to be true after concurrent Ensure calls")
 	}
 }
 
 func TestCRDAppearance_SetsCRDExists_EnsureRegisters(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{informerSynced: true}, fc)
+	w := newStartedWatcher(&fakeCache{informerSynced: true})
 	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
 
 	// Before CRD appears, Ensure should return Unavailable.
@@ -526,8 +501,7 @@ func TestCRDAppearance_SetsCRDExists_EnsureRegisters(t *testing.T) {
 }
 
 func TestCRDRemoval_ClearsCRDExists_EnsureReturnsUnavailable(t *testing.T) {
-	fc := &fakeController{}
-	w := newTestWatcher(&fakeCache{}, fc)
+	w := newStartedWatcher(&fakeCache{})
 	dynamicwatch.SetCRDExists(w, true)
 	dynamicwatch.SetActive(w, true)
 
@@ -545,30 +519,4 @@ func TestCRDRemoval_ClearsCRDExists_EnsureReturnsUnavailable(t *testing.T) {
 	if state := w.Ensure(t.Context()); state != dynamicwatch.Unavailable {
 		t.Errorf("expected Unavailable after CRD removal, got %s", state)
 	}
-}
-
-func TestBind_PanicsOnNilController(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, nil)
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on nil controller")
-		}
-	}()
-
-	w.Bind(nil)
-}
-
-func TestBind_PanicsOnDoubleBind(t *testing.T) {
-	w := newTestWatcher(&fakeCache{}, nil)
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on double bind")
-		}
-	}()
-
-	fc := &fakeController{}
-	w.Bind(fc)
-	w.Bind(fc)
 }

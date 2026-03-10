@@ -73,17 +73,16 @@ w, err := dynamicwatch.For[*v1alpha1.PluginConfig](mgr, "pluginconfigs.demo.exam
     Build()
 ```
 
-Then a two-phase wiring dance with the controller builder:
+The Watcher implements `source.SyncingSource`, so it plugs directly into the builder:
 
 ```go
-b := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Widget{})
-
-w.Register(b)        // adds CRD watch source - must be before Build
-c, err := b.Build(r)
-w.Bind(c)            // gives Watcher the controller ref - must be after Build
+ctrl.NewControllerManagedBy(mgr).
+    For(&v1alpha1.Widget{}).
+    WatchesRawSource(w).
+    Complete(r)
 ```
 
-Why two phases? controller-runtime's builder doesn't return the `controller.Controller` until `Build()`, but the CRD watch source must be registered *before* `Build()`. There's no way around this without wrapping the builder (which would be worse).
+The controller framework calls `Start` and `WaitForSync` automatically. Inside `Start`, the Watcher creates and starts a CRD sub-source that drives `onCRDChange`. The queue and context are stored for later use when `Ensure` starts object sub-sources lazily at runtime.
 
 During reconciliation, the controller calls `Ensure()` to check/register the watch, then `Get()` to read through the cache:
 
@@ -214,7 +213,7 @@ Key testing details:
 ```
 pkg/dynamicwatch/
     watcher.go           # Watcher type, builder, CRD lifecycle management
-    watcher_test.go      # Unit tests with mock WatchRegistrar
+    watcher_test.go      # Unit tests with fake cache and informer
     export_test.go       # Test helpers (state inspection, crdAvailable override)
 
 internal/controller/

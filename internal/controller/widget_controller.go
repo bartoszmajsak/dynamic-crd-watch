@@ -365,20 +365,10 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("indexing %s: %w", hasThemeRefField, err)
 	}
 
-	b := ctrl.NewControllerManagedBy(mgr).
+	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.Widget{}).
-		Named("widget")
-
-	r.pluginWatch.Register(b)
-	r.themeWatch.Register(b)
-
-	c, err := b.Build(r)
-	if err != nil {
-		return err
-	}
-
-	r.pluginWatch.Bind(c)
-	r.themeWatch.Bind(c)
-
-	return nil
+		Named("widget").
+		WatchesRawSource(r.pluginWatch).
+		WatchesRawSource(r.themeWatch).
+		Complete(r)
 }
