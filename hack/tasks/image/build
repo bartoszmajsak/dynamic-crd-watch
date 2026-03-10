@@ -6,7 +6,7 @@ BUILDER="${BUILDER:-docker}"
 IMG="${IMG:-localhost:5001/dynamic-crd-watch:test}"
 
 if [ "$BUILDER" = "docker" ]; then
-  $BUILDER buildx build -t "$IMG" .
+  $BUILDER buildx build --load -t "$IMG" .
 else
   $BUILDER build -t "$IMG" .
 fi
