@@ -93,7 +93,7 @@ type CRDCache struct {
 
 // NewCRDCache creates a shared CRD cache and registers it with the manager.
 // The cache watches all CRDs (no field selector); each watcher adds its
-// own name predicate in [Watcher.Register].
+// own name predicate.
 func NewCRDCache(mgr ctrl.Manager) (*CRDCache, error) {
 	if mgr == nil {
 		return nil, errors.New("dynamicwatch: manager is required")
@@ -250,7 +250,7 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 	w := &Watcher[T]{
 		crdName:      b.crdName,
 		gvk:          gvk,
-		cache:        mainCache,
+		objCache:     mainCache,
 		crdCache:     crdCache,
 		objectMapper: b.objectMapper,
 		requeueAll:   b.requeueAll,
@@ -269,18 +269,16 @@ var _ source.SyncingSource = (*Watcher[client.Object])(nil)
 type Watcher[T client.Object] struct {
 	crdName      string
 	gvk          schema.GroupVersionKind
-	cache        cache.Cache
+	objCache     cache.Cache
 	crdCache     cache.Cache
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
 	requeueAll   RequeueParentsFn
 	newT         func() T
 
-	// Set by Start - the controller's queue and context. The context must be
-	// stored because Ensure starts sub-sources lazily at runtime, long after
-	// Start returns, and source.Kind.Start requires one.
-	startCtx context.Context //nolint:containedctx // Required by source.TypedSource contract - Start receives ctx for later sub-source creation.
-	queue    workqueue.TypedRateLimitingInterface[reconcile.Request]
-	crdSrc   source.SyncingSource
+	// startSource is set by Start. It starts a sub-source using the
+	// controller's lifecycle context and queue, both captured at Start time.
+	startSource func(src source.SyncingSource) error
+	crdSrc      source.SyncingSource
 
 	mu        sync.Mutex
 	watching  bool // source registered via Watch (may not be synced yet)
@@ -294,8 +292,13 @@ type Watcher[T client.Object] struct {
 //
 // This method satisfies [source.TypedSource] and must not be called directly.
 func (w *Watcher[T]) Start(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-	w.startCtx = ctx
-	w.queue = queue
+	if w.startSource != nil {
+		return errors.New("dynamicwatch: Start called twice")
+	}
+
+	w.startSource = func(src source.SyncingSource) error {
+		return src.Start(ctx, queue)
+	}
 
 	w.crdSrc = source.Kind(w.crdCache, &apiextensionsv1.CustomResourceDefinition{},
 		handler.TypedEnqueueRequestsFromMapFunc(w.onCRDChange),
@@ -332,7 +335,7 @@ func (w *Watcher[T]) WaitForSync(ctx context.Context) error {
 // "already synced" - if the informer hasn't synced yet, Ensure returns
 // [Syncing] and the caller should requeue after a short delay.
 func (w *Watcher[T]) Ensure(ctx context.Context) State {
-	if w.queue == nil {
+	if w.startSource == nil {
 		logf.FromContext(ctx).Error(nil, "Start() not called, cannot register watch", "crd", w.crdName)
 
 		return Unavailable
@@ -351,13 +354,12 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 
 	log := logf.FromContext(ctx)
 
-	// Phase 1: start the watch source directly if not already done.
 	if !w.watching {
-		src := source.Kind(w.cache, w.newT(),
+		src := source.Kind(w.objCache, w.newT(),
 			handler.TypedEnqueueRequestsFromMapFunc(w.objectMapper),
 		)
 
-		if err := src.Start(w.startCtx, w.queue); err != nil { //nolint:contextcheck // Uses stored context from Start - sub-sources share the controller's lifecycle.
+		if err := w.startSource(src); err != nil {
 			log.Error(err, "Failed to start dynamic watch", "crd", w.crdName)
 
 			return Unavailable
@@ -367,8 +369,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 		log.Info("Started dynamic watch, waiting for informer sync", "crd", w.crdName)
 	}
 
-	// Phase 2: check if the informer has synced (non-blocking).
-	informer, err := w.cache.GetInformer(ctx, w.newT(), cache.BlockUntilSynced(false))
+	informer, err := w.objCache.GetInformer(ctx, w.newT(), cache.BlockUntilSynced(false))
 	if err != nil {
 		log.Error(err, "Failed to get informer", "crd", w.crdName)
 
@@ -392,7 +393,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 //
 // All other errors (including NotFound) are returned as-is.
 func (w *Watcher[T]) Get(ctx context.Context, key client.ObjectKey, obj T) error {
-	if err := w.cache.Get(ctx, key, obj); err != nil {
+	if err := w.objCache.Get(ctx, key, obj); err != nil {
 		var notCached *cache.ErrResourceNotCached
 		if errors.As(err, &notCached) {
 			w.mu.Lock()
@@ -454,7 +455,12 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 		w.mu.Unlock()
 
 		if wasWatching {
-			if err := w.cache.RemoveInformer(ctx, w.newT()); err != nil {
+			// RemoveInformer is called outside the mutex to avoid deadlocks with
+			// potentially blocking cache operations. This is safe because
+			// controller-runtime's internal informer map has its own lock, and
+			// Get's ErrResourceNotCached handling serves as a safety net for
+			// any race between RemoveInformer and concurrent Ensure/Get calls.
+			if err := w.objCache.RemoveInformer(ctx, w.newT()); err != nil {
 				log.Error(err, "Failed to remove informer", "crd", w.crdName)
 			}
 

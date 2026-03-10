@@ -15,15 +15,15 @@ import (
 	"context"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // NewTestWatcher creates a Watcher for unit testing without requiring a
 // ctrl.Manager. In production, Build() derives the GVK from the scheme,
-// creates a CRD cache, etc. - none of which is needed (or desirable)
+// creates a CRD objCache, etc. - none of which is needed (or desirable)
 // in a unit test.
 //
 // Only the essential dependency (cache) is a parameter. GVK, object mapper,
@@ -36,19 +36,27 @@ func NewTestWatcher[T client.Object](
 ) *Watcher[T] {
 	return &Watcher[T]{
 		crdName:      crdName,
-		cache:        c,
+		objCache:     c,
 		objectMapper: func(_ context.Context, _ T) []reconcile.Request { return nil },
 		requeueAll:   func(_ context.Context) []reconcile.Request { return nil },
 		newT:         newInstance[T],
 	}
 }
 
-// SetStarted simulates the post-Start state by setting the queue and
-// startCtx fields. This is the equivalent of the controller framework
-// calling Start on the source.
-func SetStarted[T client.Object](w *Watcher[T], ctx context.Context) {
-	w.startCtx = ctx
-	w.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+// SetStarted simulates the post-Start state by setting the startSource
+// closure. This is the equivalent of the controller framework calling
+// Start on the source.
+func SetStarted[T client.Object](w *Watcher[T]) {
+	w.startSource = func(src source.SyncingSource) error {
+		return src.Start(context.Background(), nil)
+	}
+}
+
+// SetStartSource replaces the startSource closure directly. Use this to
+// inject failures or count calls in tests that need fine-grained control
+// over the source startup behavior.
+func SetStartSource[T client.Object](w *Watcher[T], fn func(src source.SyncingSource) error) {
+	w.startSource = fn
 }
 
 // SetCRDExists sets the event-driven CRD existence flag.

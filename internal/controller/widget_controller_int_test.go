@@ -522,6 +522,115 @@ var _ = Describe("Widget Controller", func() {
 		})
 	})
 
+	Context("shared CRDCache isolation", func() {
+
+		It("should not affect one watcher when the other CRD is removed", func(ctx SpecContext) {
+			widget := fixture.Widget("cross-isolation", namespace,
+				fixture.WithPluginRef("iso-plugin"),
+				fixture.WithThemeRef("iso-theme"),
+			)
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("installing both CRDs and creating resources")
+			pluginCRD := installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(pluginCRD)
+
+			themeCRD := installCRD(ctx, themeCRDPath)
+
+			plugin := fixture.PluginConfig("iso-plugin", namespace, "plugin-setting")
+			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, plugin))).To(Succeed())
+			})
+
+			theme := fixture.Theme("iso-theme", namespace, "ocean-blue")
+			Expect(k8sClient.Create(ctx, theme)).To(Succeed())
+
+			By("waiting for both conditions to be True")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(And(
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
+					fixture.HaveCondition(demov1alpha1.ConditionThemeReady, metav1.ConditionTrue),
+				))
+			}).WithContext(ctx).Should(Succeed())
+
+			By("removing ONLY the Theme CRD")
+			removeCRD(ctx, themeCRD)
+
+			By("Theme condition should become CRDNotAvailable while Plugin remains True")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(And(
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
+					fixture.HaveConditionWithReason(
+						demov1alpha1.ConditionThemeReady,
+						metav1.ConditionFalse,
+						demov1alpha1.ReasonThemeCRDNotAvailable,
+					),
+				))
+			}).WithContext(ctx).Should(Succeed())
+
+			By("Plugin condition should stay True consistently")
+			Consistently(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
+				)
+			}).WithContext(ctx).WithTimeout(2 * time.Second).Should(Succeed())
+		})
+	})
+
+	Context("rapid CRD lifecycle", func() {
+
+		It("should recover from rapid remove/reinstall without waiting for stabilization", func(ctx SpecContext) {
+			widget := fixture.Widget("rapid-cycle", namespace, fixture.WithPluginRef("rapid-plugin"))
+			Expect(k8sClient.Create(ctx, widget)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, widget))).To(Succeed())
+			})
+
+			By("installing CRD and creating plugin")
+			crd := installCRD(ctx, pluginConfigCRDPath)
+
+			plugin := fixture.PluginConfig("rapid-plugin", namespace, "rapid-v1")
+			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
+
+			By("waiting for PluginReady=True")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveCondition(demov1alpha1.ConditionPluginReady, metav1.ConditionTrue),
+				)
+			}).WithContext(ctx).Should(Succeed())
+
+			By("rapidly removing and reinstalling CRD without waiting for intermediate states")
+			removeCRD(ctx, crd)
+			// Immediately reinstall - don't wait for Widget status to update.
+			crd = installCRD(ctx, pluginConfigCRDPath)
+			deferCRDCleanup(crd)
+
+			By("creating plugin with new value")
+			plugin = fixture.PluginConfig("rapid-plugin", namespace, "rapid-v2")
+			Expect(k8sClient.Create(ctx, plugin)).To(Succeed())
+
+			By("eventually recovering to PluginReady=True with new setting")
+			Eventually(func(g Gomega, ctx context.Context) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(widget), widget)).To(Succeed())
+				g.Expect(widget.Status.Conditions).To(
+					fixture.HaveConditionWithMessage(
+						demov1alpha1.ConditionPluginReady,
+						metav1.ConditionTrue,
+						"rapid-v2",
+					),
+				)
+			}).WithContext(ctx).Should(Succeed())
+		})
+	})
+
 	Context("both pluginRef and themeRef", func() {
 
 		It("should track both conditions independently", func(ctx SpecContext) {

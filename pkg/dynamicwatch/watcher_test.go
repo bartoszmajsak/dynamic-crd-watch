@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/bartoszmajsak/dynamic-watch-poc/pkg/dynamicwatch"
 )
@@ -27,6 +29,7 @@ type fakeCache struct {
 	removeErr      error
 	removeCalls    int
 	getErr         error
+	getInformerErr error
 	informerSynced bool
 	mu             sync.Mutex
 }
@@ -52,6 +55,10 @@ func (f *fakeCache) Get(_ context.Context, _ client.ObjectKey, _ client.Object, 
 }
 
 func (f *fakeCache) GetInformer(_ context.Context, _ client.Object, _ ...cache.InformerGetOption) (cache.Informer, error) {
+	if f.getInformerErr != nil {
+		return nil, f.getInformerErr
+	}
+
 	return &fakeInformer{synced: f.informerSynced}, nil
 }
 
@@ -86,7 +93,7 @@ func newTestWatcher(fc *fakeCache) *dynamicwatch.Watcher[*corev1.ConfigMap] {
 
 func newStartedWatcher(fc *fakeCache) *dynamicwatch.Watcher[*corev1.ConfigMap] {
 	w := newTestWatcher(fc)
-	dynamicwatch.SetStarted(w, context.Background())
+	dynamicwatch.SetStarted(w)
 
 	return w
 }
@@ -456,9 +463,69 @@ func TestSimulateCRDChange_WatchingSyncingNotActive_RemovesInformerSkipsRequeue(
 	}
 }
 
-func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
-	w := newStartedWatcher(&fakeCache{informerSynced: true})
+func TestEnsure_StartSourceFails_ReturnsUnavailable(t *testing.T) {
+	fc := &fakeCache{informerSynced: true}
+	w := newTestWatcher(fc)
 	dynamicwatch.SetCRDExists(w, true)
+
+	callCount := 0
+	dynamicwatch.SetStartSource(w, func(src source.SyncingSource) error {
+		callCount++
+		if callCount == 1 {
+			return errors.New("start failed")
+		}
+
+		return src.Start(context.Background(), nil)
+	})
+
+	// First call should fail.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Unavailable {
+		t.Errorf("expected Unavailable on start failure, got %s", state)
+	}
+
+	// Second call should retry and succeed.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Ready {
+		t.Errorf("expected Ready on retry, got %s", state)
+	}
+}
+
+func TestEnsure_GetInformerFails_ReturnsUnavailable(t *testing.T) {
+	fc := &fakeCache{getInformerErr: errors.New("informer unavailable")}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetCRDExists(w, true)
+
+	// Use a no-op startSource to avoid source.Kind spawning background
+	// goroutines that race with the fakeCache field mutations below.
+	dynamicwatch.SetStartSource(w, func(_ source.SyncingSource) error {
+		return nil
+	})
+
+	state := w.Ensure(t.Context())
+	if state != dynamicwatch.Unavailable {
+		t.Errorf("expected Unavailable when GetInformer fails, got %s", state)
+	}
+
+	// Fix the error and retry - should succeed.
+	fc.getInformerErr = nil
+	fc.informerSynced = true
+
+	state = w.Ensure(t.Context())
+	if state != dynamicwatch.Ready {
+		t.Errorf("expected Ready on retry after GetInformer fixed, got %s", state)
+	}
+}
+
+func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
+	fc := &fakeCache{informerSynced: true}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetCRDExists(w, true)
+
+	var startCount atomic.Int32
+	dynamicwatch.SetStartSource(w, func(src source.SyncingSource) error {
+		startCount.Add(1)
+
+		return src.Start(context.Background(), nil)
+	})
 
 	var wg sync.WaitGroup
 	for range 10 {
@@ -468,9 +535,194 @@ func TestEnsure_ConcurrentCalls_RegistersOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Verify the watch is ready (concurrent calls should all succeed).
 	if !w.Available() {
 		t.Error("expected Available() to be true after concurrent Ensure calls")
+	}
+
+	if c := startCount.Load(); c != 1 {
+		t.Errorf("expected startSource called once, got %d", c)
+	}
+}
+
+func TestEnsure_CRDRemovedMidSync_FullRecovery(t *testing.T) {
+	fc := &fakeCache{informerSynced: false}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetCRDExists(w, true)
+
+	var startCount atomic.Int32
+	dynamicwatch.SetStartSource(w, func(_ source.SyncingSource) error {
+		startCount.Add(1)
+
+		return nil
+	})
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	// Step 1: Ensure starts the watch, informer not synced → Syncing.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Syncing {
+		t.Fatalf("expected Syncing, got %s", state)
+	}
+
+	// Step 2: CRD is removed before informer syncs.
+	removedCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+	dynamicwatch.SimulateCRDChange(w, t.Context(), removedCRD)
+
+	// Step 3: After removal, Ensure should return Unavailable.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Unavailable {
+		t.Fatalf("expected Unavailable after CRD removal, got %s", state)
+	}
+
+	// Step 4: CRD is reinstalled.
+	establishedCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
+			},
+		},
+	}
+	dynamicwatch.SimulateCRDChange(w, t.Context(), establishedCRD)
+
+	// Step 5: Make informer synced for the retry.
+	fc.informerSynced = true
+
+	// Step 6: Ensure should re-register and become Ready.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Ready {
+		t.Errorf("expected Ready after reinstall, got %s", state)
+	}
+
+	// startSource should have been called twice (initial + re-registration).
+	if c := startCount.Load(); c != 2 {
+		t.Errorf("expected startSource called 2 times, got %d", c)
+	}
+}
+
+func TestSimulateCRDChange_NotEstablished_DoesNotReRegister(t *testing.T) {
+	fc := &fakeCache{informerSynced: true}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetCRDExists(w, true)
+
+	var startCount atomic.Int32
+	dynamicwatch.SetStartSource(w, func(_ source.SyncingSource) error {
+		startCount.Add(1)
+
+		return nil
+	})
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	// First, get to Ready state.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Ready {
+		t.Fatalf("expected Ready, got %s", state)
+	}
+
+	// Simulate CRD status update with Established=False (mid-deletion, no
+	// DeletionTimestamp yet). This is the critical pitfall scenario.
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: testCRDName},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionFalse},
+			},
+		},
+	}
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	// After the Established=False event, the watcher should be deactivated.
+	if w.Available() {
+		t.Error("expected watch to be deactivated")
+	}
+
+	// Ensure should return Unavailable - NOT attempt to re-register.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Unavailable {
+		t.Errorf("expected Unavailable, got %s", state)
+	}
+
+	// startSource should have been called exactly once (initial registration
+	// only - the Established=False event must NOT trigger re-registration).
+	if c := startCount.Load(); c != 1 {
+		t.Errorf("expected startSource called once (no re-registration), got %d", c)
+	}
+}
+
+func TestConcurrent_OnCRDChange_And_Ensure(t *testing.T) {
+	fc := &fakeCache{informerSynced: true}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetStartSource(w, func(_ source.SyncingSource) error {
+		return nil
+	})
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
+		return []reconcile.Request{{}}
+	})
+
+	// Get to Ready state.
+	if state := w.Ensure(t.Context()); state != dynamicwatch.Ready {
+		t.Fatalf("expected Ready, got %s", state)
+	}
+
+	removedCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+
+	// Run onCRDChange and Ensure concurrently many times to stress the mutex.
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() {
+			dynamicwatch.SimulateCRDChange(w, t.Context(), removedCRD)
+		})
+		wg.Go(func() {
+			w.Ensure(t.Context())
+		})
+	}
+	wg.Wait()
+
+	// After all CRD removal events, the watcher must be deactivated.
+	if w.Available() {
+		t.Error("expected watch to be deactivated after concurrent CRD removals")
+	}
+}
+
+func TestConcurrent_OnCRDChange_And_Get(t *testing.T) {
+	fc := &fakeCache{}
+	w := newTestWatcher(fc)
+	dynamicwatch.SetStartSource(w, func(_ source.SyncingSource) error {
+		return nil
+	})
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
+		return []reconcile.Request{{}}
+	})
+	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetCRDExists(w, true)
+
+	removedCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+
+	// Run onCRDChange and Get concurrently to stress the mutex.
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() {
+			dynamicwatch.SimulateCRDChange(w, t.Context(), removedCRD)
+		})
+		wg.Go(func() {
+			_ = w.Get(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
+		})
+	}
+	wg.Wait()
+
+	// After all CRD removal events, the watcher must be deactivated.
+	if w.Available() {
+		t.Error("expected watch to be deactivated after concurrent CRD removals")
 	}
 }
 

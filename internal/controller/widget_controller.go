@@ -170,7 +170,8 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 }
 
 // mergeResults returns the result with the shortest RequeueAfter, preferring
-// requeue over no-requeue.
+// requeue over no-requeue. Result.Requeue (without duration) is intentionally
+// not handled - all callers use RequeueAfter or return errors.
 func mergeResults(results ...ctrl.Result) ctrl.Result {
 	var merged ctrl.Result
 	for _, r := range results {
