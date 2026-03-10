@@ -19,7 +19,8 @@ graph TD
     end
 
     subgraph "Caches"
-        MC[Main Cache\nReaderFailOnMissingInformer: true]
+        PC1[PluginConfig Cache\nprivate, ReaderFailOnMissing]
+        PC2[Theme Cache\nprivate, ReaderFailOnMissing]
         SC[Shared CRD Cache\nall CRDs, filtered by predicate]
     end
 
@@ -30,15 +31,16 @@ graph TD
 
     WC --> PW
     WC --> TW
-    PW --> MC
-    TW --> MC
+    PW --> PC1
+    TW --> PC2
     PW --> SC
     TW --> SC
     SC -->|watches all CRDs| CRDs
-    MC -->|dynamic informers| Resources
+    PC1 -->|dynamic informer| Resources
+    PC2 -->|dynamic informer| Resources
 ```
 
-The Widget controller owns two Watchers that share a single `CRDCache`. The shared cache watches all CRDs; each Watcher adds a `crdNamePredicate` so it only reacts to events for its own CRD. When a Watcher detects its CRD appearing, it registers an informer on the main cache for the actual resource type. When the CRD disappears, it tears that informer down.
+The Widget controller owns two Watchers that share a single `CRDCache`. The shared cache watches all CRDs; each Watcher adds a `crdNamePredicate` so it only reacts to events for its own CRD. When a Watcher detects its CRD appearing, it registers an informer on its private object cache for the actual resource type. When the CRD disappears, it tears that informer down. Each Watcher's cache is independent - removing an informer from one never affects the other.
 
 If you prefer isolation (or don't want to create a shared cache), omit `WithCRDCache` and each Watcher creates a dedicated cache with a server-side field selector on `metadata.name` instead.
 
@@ -157,13 +159,13 @@ func (w *Watcher[T]) Start(ctx context.Context, queue workqueue.TypedRateLimitin
 
 This avoids storing a `context.Context` as a struct field (a Go anti-pattern flagged by `containedctx`). When `Ensure` needs to start an object source later at runtime, it calls `w.startSource(src)` - the closure already has everything it needs.
 
-### `ReaderFailOnMissingInformer` is not optional
+### Private object cache per Watcher
 
-The main cache **must** have `ReaderFailOnMissingInformer: true`. Without it, a `Get()` call after `RemoveInformer()` silently creates a *new* informer for the removed GVK. That informer tries to list/watch against a non-existent API and blocks on `WaitForCacheSync` forever. Your controller worker goroutine is now permanently stuck. Ask me how I know.
+Each Watcher creates its own `cache.Cache` for object type T, rather than using the manager's shared cache. This solves a real multi-controller problem: if two controllers in the same manager watch the same optional GVK (e.g. `KnativeService` in KServe is watched by both `InferenceServiceReconciler` and `InferenceGraphReconciler`), one controller's `RemoveInformer` would kill the informer for the other.
 
-With this flag, `Get()` returns `ErrResourceNotCached` instead, which `Watcher.Get()` translates to `ErrCacheInvalidated` - a clean signal to requeue.
+The private cache is configured with `ReaderFailOnMissingInformer: true` internally. Without this flag, a `Get()` after `RemoveInformer()` silently creates a *new* informer that tries to list/watch a non-existent API and blocks forever. With it, `Get()` returns `ErrResourceNotCached`, which `Watcher.Get()` translates to `ErrCacheInvalidated` - a clean signal to requeue.
 
-`Build()` probes the manager's cache at construction time and returns a clear error if the flag isn't set. You find out at startup, not at 3 AM in production.
+Because the Watcher owns the flag on its private cache, callers don't need to configure anything special on their manager cache. Zero adoption friction.
 
 ### CRD deletion race
 
@@ -216,7 +218,7 @@ Tests use envtest with Ginkgo v2 and run in three modes:
 Key testing details:
 
 - **Only Widget CRD installed at startup.** PluginConfig and Theme CRDs are installed and removed dynamically during tests to exercise the full lifecycle.
-- **`directClient` bypasses the manager cache.** CRD operations (install/remove) use an uncached client because the manager's cache has `ReaderFailOnMissingInformer: true` and CRD informers live in each Watcher's dedicated cache.
+- **`directClient` bypasses the manager cache.** CRD operations (install/remove) use an uncached client because CRD informers live in each Watcher's dedicated cache, not the manager's main cache.
 - **Unit tests use the export_test.go pattern.** White-box test helpers like `SetStarted`, `SetCRDExists`, `SimulateCRDChange`, and `SetStartSource` live in `export_test.go` so the black-box tests in `watcher_test.go` can exercise internal state transitions without coupling to struct layout.
 - **Concurrency is tested explicitly.** Concurrent `Ensure` + `onCRDChange` and concurrent `Get` + `onCRDChange` tests run with `-race` to verify the mutex and closure-based lifecycle handling.
 - **Lifecycle is the test.** The interesting tests are the dynamic ones: CRD not available, CRD install at runtime, CRD removal, add/remove/re-add cycle, rapid remove/reinstall, shared CRDCache isolation, and both Watchers operating simultaneously with independent conditions. If you can install and remove a CRD three times without the controller hanging, you're in good shape.

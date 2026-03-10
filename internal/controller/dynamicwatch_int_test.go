@@ -4,7 +4,6 @@ import (
 	"context"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -17,40 +16,13 @@ import (
 
 var _ = Describe("dynamicwatch.Build", func() {
 
-	It("rejects a cache without ReaderFailOnMissingInformer", func() {
+	It("succeeds with a plain manager cache (no special configuration required)", func() {
 		if deployedManager {
 			Skip("requires in-process manager")
 		}
 
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme: k8sClient.Scheme(),
-			Cache: cache.Options{
-				ReaderFailOnMissingInformer: false,
-			},
-			Metrics: metricsserver.Options{
-				BindAddress: "0",
-			},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		_, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, "pluginconfigs.demo.example.com").
-			EnqueueOnObjectChange(noopObjectMapper).
-			EnqueueOnCRDChange(noopRequeueAll).
-			Build()
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("ReaderFailOnMissingInformer"))
-	})
-
-	It("accepts a cache with ReaderFailOnMissingInformer", func() {
-		if deployedManager {
-			Skip("requires in-process manager")
-		}
-
-		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-			Scheme: k8sClient.Scheme(),
-			Cache: cache.Options{
-				ReaderFailOnMissingInformer: true,
-			},
 			Metrics: metricsserver.Options{
 				BindAddress: "0",
 			},

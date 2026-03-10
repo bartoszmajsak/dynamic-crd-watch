@@ -11,7 +11,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,7 +35,7 @@ var (
 
 	// directClient bypasses the manager's cache. Required for CRD operations
 	// because CRD informers live in each Watcher's dedicated cache, not the
-	// manager's main cache (which has ReaderFailOnMissingInformer: true).
+	// manager's main cache.
 	directClient client.Client
 
 	deployedManager bool
@@ -183,12 +182,6 @@ func setupEnvtest(root string) {
 func startInProcessManager() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
-		Cache: cache.Options{
-			// Prevent r.Get from auto-creating informers for GVKs whose informer was removed.
-			// Without this, reading a PluginConfig after its informer was removed would block
-			// forever waiting for a new informer to sync against a non-existent CRD.
-			ReaderFailOnMissingInformer: true,
-		},
 		Metrics: metricsserver.Options{
 			BindAddress: "0", // disable metrics in tests
 		},

@@ -3,9 +3,14 @@
 // registering an informer when the CRD appears and tearing it down when it
 // disappears - without requiring a controller restart.
 //
-// The cache must be created with [cache.Options.ReaderFailOnMissingInformer]
-// set to true. Without it, a read after informer removal silently starts a
-// new informer that blocks on sync forever.
+// Each Watcher creates a private cache for its object type T, separate from
+// the manager's shared cache. This is critical for multi-controller managers:
+// if two controllers watch the same optional GVK and one removes the informer,
+// a shared cache would break both controllers. The private cache ensures that
+// each Watcher's [cache.Cache.RemoveInformer] call only affects its own
+// informer. The private cache is configured with
+// [cache.Options.ReaderFailOnMissingInformer] internally - callers don't need
+// to set any special options on their manager cache.
 //
 // A Watcher implements [source.SyncingSource], so it plugs directly into the
 // controller builder:
@@ -229,28 +234,27 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		crdCache = c
 	}
 
-	mainCache := b.mgr.GetCache()
+	// Private cache for object type T. Each Watcher gets its own cache so that
+	// RemoveInformer only affects this Watcher - not other controllers in the
+	// same manager that may watch the same GVK.
+	objCache, err := cache.New(b.mgr.GetConfig(), cache.Options{
+		HTTPClient:                  b.mgr.GetHTTPClient(),
+		Scheme:                      b.mgr.GetScheme(),
+		Mapper:                      b.mgr.GetRESTMapper(),
+		ReaderFailOnMissingInformer: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating object cache for %s: %w", b.crdName, err)
+	}
 
-	// Verify that the manager's cache has ReaderFailOnMissingInformer set.
-	// Without it, a Get after RemoveInformer silently creates a new informer
-	// that blocks on WaitForCacheSync forever instead of returning ErrResourceNotCached.
-	probeCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	probeErr := mainCache.Get(probeCtx, client.ObjectKey{Namespace: "__probe__", Name: "__probe__"}, newT())
-
-	var notCached *cache.ErrResourceNotCached
-	if !errors.As(probeErr, &notCached) {
-		return nil, fmt.Errorf(
-			"dynamicwatch: manager cache must have ReaderFailOnMissingInformer: true; "+
-				"without it, reads after informer removal will deadlock "+
-				"(probe returned: %v)", probeErr)
+	if addErr := b.mgr.Add(objCache); addErr != nil {
+		return nil, fmt.Errorf("registering object cache for %s: %w", b.crdName, addErr)
 	}
 
 	w := &Watcher[T]{
 		crdName:      b.crdName,
 		gvk:          gvk,
-		objCache:     mainCache,
+		objCache:     objCache,
 		crdCache:     crdCache,
 		objectMapper: b.objectMapper,
 		requeueAll:   b.requeueAll,
