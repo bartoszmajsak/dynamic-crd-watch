@@ -180,6 +180,10 @@ func (b *WatcherBuilder[T]) WithCRDCache(c *CRDCache) *WatcherBuilder[T] {
 //
 // Mutually exclusive with [WatcherBuilder.EnqueueForOwner].
 func (b *WatcherBuilder[T]) WithEventHandler(h handler.TypedEventHandler[T, reconcile.Request]) *WatcherBuilder[T] {
+	if h == nil {
+		panic("dynamicwatch: WithEventHandler called with nil handler")
+	}
+
 	b.objHandler = h
 
 	return b
@@ -288,6 +292,11 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 	// Private cache for object type T. Each Watcher gets its own cache so that
 	// RemoveInformer only affects this Watcher - not other controllers in the
 	// same manager that may watch the same GVK.
+	//
+	// Note: we cannot scope this cache with ByObject because the CRD for type T
+	// may not be installed yet. ByObject resolves namespace scoping via the REST
+	// mapper at creation time, which fails for unregistered GVKs.
+	// ReaderFailOnMissingInformer prevents accidental informer creation instead.
 	objCache, err := cache.New(b.mgr.GetConfig(), cache.Options{
 		HTTPClient:                  b.mgr.GetHTTPClient(),
 		Scheme:                      b.mgr.GetScheme(),
@@ -351,6 +360,7 @@ type Watcher[T client.Object] struct {
 	watching  bool // source registered via Watch (may not be synced yet)
 	active    bool // informer synced - safe to read
 	crdExists bool
+	informer  cache.Informer // cached after first GetInformer, cleared on teardown
 }
 
 // Start is called by the controller framework when it starts. It stores
@@ -434,14 +444,18 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 		log.Info("Started dynamic watch, waiting for informer sync", "crd", w.crdName)
 	}
 
-	informer, err := w.objCache.GetInformer(ctx, w.newT(), cache.BlockUntilSynced(false))
-	if err != nil {
-		log.Error(err, "Failed to get informer", "crd", w.crdName)
+	if w.informer == nil {
+		inf, err := w.objCache.GetInformer(ctx, w.newT(), cache.BlockUntilSynced(false))
+		if err != nil {
+			log.Error(err, "Failed to get informer", "crd", w.crdName)
 
-		return Unavailable
+			return Unavailable
+		}
+
+		w.informer = inf
 	}
 
-	if !informer.HasSynced() {
+	if !w.informer.HasSynced() {
 		return Syncing
 	}
 
@@ -464,6 +478,7 @@ func (w *Watcher[T]) Get(ctx context.Context, key client.ObjectKey, obj T) error
 			w.mu.Lock()
 			w.watching = false
 			w.active = false
+			w.informer = nil
 			// Reset crdExists because ErrResourceNotCached only occurs after
 			// onCRDChange called RemoveInformer due to CRD removal. A subsequent
 			// CRD re-installation will trigger a new onCRDChange event that sets
@@ -517,6 +532,7 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 		w.watching = false
 		w.active = false
 		w.crdExists = false
+		w.informer = nil
 		w.mu.Unlock()
 
 		if wasWatching {

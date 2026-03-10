@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
@@ -369,6 +370,7 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.Widget{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Named("widget").
 		WatchesRawSource(r.pluginWatch).
 		WatchesRawSource(r.themeWatch).

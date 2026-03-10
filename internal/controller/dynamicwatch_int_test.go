@@ -3,7 +3,9 @@ package controller_test
 import (
 	"context"
 
-	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -16,6 +18,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// unregisteredType is a minimal client.Object not added to any scheme.
+// Used to test the defensive GVK check in Build().
+type unregisteredType struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+}
+
+func (u *unregisteredType) DeepCopyObject() runtime.Object   { return u }
+func (u *unregisteredType) GetObjectKind() schema.ObjectKind { return &u.TypeMeta }
 
 var _ = Describe("dynamicwatch.Build", func() {
 
@@ -110,14 +122,11 @@ var _ = Describe("dynamicwatch.Build", func() {
 			Skip("requires in-process manager")
 		}
 
-		// Pod is always registered so we test the success path here.
-		// The defensive GVK check in Build() would catch unregistered types
-		// with a clean error instead of a panic.
 		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
-			EnqueueForOwner(&corev1.Pod{}).
+			EnqueueForOwner(&unregisteredType{}).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("deriving GVK for owner type")))
 	})
 
 	It("panics when EnqueueForOwner is called with nil", func() {
@@ -129,6 +138,17 @@ var _ = Describe("dynamicwatch.Build", func() {
 			dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
 				EnqueueForOwner(nil)
 		}).To(PanicWith(ContainSubstring("nil ownerType")))
+	})
+
+	It("panics when WithEventHandler is called with nil", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		Expect(func() {
+			dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+				WithEventHandler(nil)
+		}).To(PanicWith(ContainSubstring("nil handler")))
 	})
 })
 
