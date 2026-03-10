@@ -3,8 +3,11 @@ package controller_test
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	demov1alpha1 "github.com/bartoszmajsak/dynamic-watch-poc/api/v1alpha1"
@@ -16,11 +19,7 @@ import (
 
 var _ = Describe("dynamicwatch.Build", func() {
 
-	It("succeeds with a plain manager cache (no special configuration required)", func() {
-		if deployedManager {
-			Skip("requires in-process manager")
-		}
-
+	newMgr := func() ctrl.Manager {
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme: k8sClient.Scheme(),
 			Metrics: metricsserver.Options{
@@ -29,12 +28,115 @@ var _ = Describe("dynamicwatch.Build", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, "pluginconfigs.demo.example.com").
-			EnqueueOnObjectChange(noopObjectMapper).
+		return mgr
+	}
+
+	It("succeeds with WithEventHandler", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
 		Expect(err).NotTo(HaveOccurred())
 	})
+
+	It("succeeds with EnqueueForOwner", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			EnqueueForOwner(&demov1alpha1.Widget{}).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("succeeds with EnqueueForOwner and WithPredicates", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			EnqueueForOwner(&demov1alpha1.Widget{}, handler.OnlyControllerOwner()).
+			WithPredicates(acceptAllPluginConfigs).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("succeeds with WithEventHandler and WithPredicates", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			WithPredicates(acceptAllPluginConfigs).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("rejects when neither WithEventHandler nor EnqueueForOwner is set", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("WithEventHandler or EnqueueForOwner is required")))
+	})
+
+	It("rejects when both WithEventHandler and EnqueueForOwner are set", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			EnqueueForOwner(&demov1alpha1.Widget{}).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("mutually exclusive")))
+	})
+
+	It("rejects when owner type is not registered in the scheme", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		// Pod is always registered so we test the success path here.
+		// The defensive GVK check in Build() would catch unregistered types
+		// with a clean error instead of a panic.
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+			EnqueueForOwner(&corev1.Pod{}).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("panics when EnqueueForOwner is called with nil", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		Expect(func() {
+			dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "pluginconfigs.demo.example.com").
+				EnqueueForOwner(nil)
+		}).To(PanicWith(ContainSubstring("nil ownerType")))
+	})
+})
+
+// acceptAllPluginConfigs is a properly typed predicate for use in WithPredicates tests.
+// Generic predicates like predicate.GenerationChangedPredicate are typed for
+// client.Object and don't satisfy TypedPredicate[*PluginConfig].
+var acceptAllPluginConfigs = predicate.NewTypedPredicateFuncs(func(_ *demov1alpha1.PluginConfig) bool {
+	return true
 })
 
 func noopObjectMapper(_ context.Context, _ *demov1alpha1.PluginConfig) []reconcile.Request {

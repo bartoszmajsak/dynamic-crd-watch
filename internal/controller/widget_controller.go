@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -286,7 +287,7 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	r.pluginWatch, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, pluginConfigCRDName).
 		WithCRDCache(crdCache).
-		EnqueueOnObjectChange(r.pluginConfigToWidgets).
+		WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.pluginConfigToWidgets)).
 		EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
 		Build()
 	if err != nil {
@@ -295,7 +296,7 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	r.themeWatch, err = dynamicwatch.For[*demov1alpha1.Theme](mgr, themeCRDName).
 		WithCRDCache(crdCache).
-		EnqueueOnObjectChange(r.themeToWidgets).
+		WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.themeToWidgets)).
 		EnqueueOnCRDChange(r.allWidgetsWithThemeRef).
 		Build()
 	if err != nil {

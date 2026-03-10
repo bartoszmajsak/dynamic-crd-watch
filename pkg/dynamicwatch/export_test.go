@@ -17,6 +17,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -26,7 +27,7 @@ import (
 // creates a CRD objCache, etc. - none of which is needed (or desirable)
 // in a unit test.
 //
-// Only the essential dependency (cache) is a parameter. GVK, object mapper,
+// Only the essential dependency (cache) is a parameter. GVK, event handler,
 // requeue function, and newT are defaulted to safe no-ops. Use
 // SetCRDExists, SetRequeueAll, and SetStarted to override behavior
 // for specific test scenarios.
@@ -35,11 +36,13 @@ func NewTestWatcher[T client.Object](
 	c cache.Cache,
 ) *Watcher[T] {
 	return &Watcher[T]{
-		crdName:      crdName,
-		objCache:     c,
-		objectMapper: func(_ context.Context, _ T) []reconcile.Request { return nil },
-		requeueAll:   func(_ context.Context) []reconcile.Request { return nil },
-		newT:         newInstance[T],
+		crdName:  crdName,
+		objCache: c,
+		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
+			func(_ context.Context, _ T) []reconcile.Request { return nil },
+		),
+		requeueAll: func(_ context.Context) []reconcile.Request { return nil },
+		newT:       newInstance[T],
 	}
 }
 

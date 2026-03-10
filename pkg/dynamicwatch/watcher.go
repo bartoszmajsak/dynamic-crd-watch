@@ -16,7 +16,7 @@
 // controller builder:
 //
 //	w, err := dynamicwatch.For[*v1alpha1.PluginConfig](mgr, "pluginconfigs.demo.example.com").
-//	    EnqueueOnObjectChange(r.pluginConfigToWidgets).
+//	    WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.pluginConfigToWidgets)).
 //	    EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
 //	    Build()
 //
@@ -127,11 +127,14 @@ func NewCRDCache(mgr ctrl.Manager) (*CRDCache, error) {
 
 // WatcherBuilder constructs a [Watcher] for an optional CRD using a fluent API.
 type WatcherBuilder[T client.Object] struct {
-	mgr          ctrl.Manager
-	crdName      string
-	crdCache     *CRDCache
-	objectMapper handler.TypedMapFunc[T, reconcile.Request]
-	requeueAll   RequeueParentsFn
+	mgr        ctrl.Manager
+	crdName    string
+	crdCache   *CRDCache
+	objHandler handler.TypedEventHandler[T, reconcile.Request]
+	ownerType  client.Object
+	ownerOpts  []handler.OwnerOption
+	predicates []predicate.TypedPredicate[T]
+	requeueAll RequeueParentsFn
 }
 
 // For starts building a [Watcher] for an optional CRD.
@@ -166,10 +169,51 @@ func (b *WatcherBuilder[T]) WithCRDCache(c *CRDCache) *WatcherBuilder[T] {
 	return b
 }
 
-// EnqueueOnObjectChange sets the function that maps individual T events
-// (create/update/delete) to reconcile requests for parent objects.
-func (b *WatcherBuilder[T]) EnqueueOnObjectChange(fn handler.TypedMapFunc[T, reconcile.Request]) *WatcherBuilder[T] {
-	b.objectMapper = fn
+// WithEventHandler sets the event handler that maps T events
+// (create/update/delete) to reconcile requests. This is the general-purpose
+// method - the dynamic-watch equivalent of controller-runtime's
+// builder.Watches().
+//
+// Common handlers:
+//   - [handler.TypedEnqueueRequestsFromMapFunc] - custom mapping logic
+//   - [handler.TypedEnqueueRequestForOwner] - owner-reference-based (see [WatcherBuilder.EnqueueForOwner] for a shortcut)
+//
+// Mutually exclusive with [WatcherBuilder.EnqueueForOwner].
+func (b *WatcherBuilder[T]) WithEventHandler(h handler.TypedEventHandler[T, reconcile.Request]) *WatcherBuilder[T] {
+	b.objHandler = h
+
+	return b
+}
+
+// EnqueueForOwner is a convenience method that configures the watcher to
+// enqueue reconcile requests for the owner of the watched object, using
+// owner references. This is the dynamic-watch equivalent of
+// controller-runtime's builder.Owns().
+//
+// It is shorthand for calling [WatcherBuilder.WithEventHandler] with
+// [handler.TypedEnqueueRequestForOwner].
+//
+// The ownerType is the type of the owner (e.g. &v1alpha1.Widget{}).
+// Optional [handler.OwnerOption] values control matching behavior
+// (e.g. handler.OnlyControllerOwner()).
+//
+// Mutually exclusive with [WatcherBuilder.WithEventHandler].
+func (b *WatcherBuilder[T]) EnqueueForOwner(ownerType client.Object, opts ...handler.OwnerOption) *WatcherBuilder[T] {
+	if ownerType == nil {
+		panic("dynamicwatch: EnqueueForOwner called with nil ownerType")
+	}
+
+	b.ownerType = ownerType
+	b.ownerOpts = opts
+
+	return b
+}
+
+// WithPredicates adds predicates that filter events before they reach the
+// event handler. Predicates are passed to [source.Kind] when the watch
+// is registered.
+func (b *WatcherBuilder[T]) WithPredicates(preds ...predicate.TypedPredicate[T]) *WatcherBuilder[T] {
+	b.predicates = append(b.predicates, preds...)
 
 	return b
 }
@@ -193,8 +237,15 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		return nil, errors.New("dynamicwatch: crdName is required")
 	}
 
-	if b.objectMapper == nil {
-		return nil, fmt.Errorf("dynamicwatch: EnqueueOnObjectChange is required for %s", b.crdName)
+	hasHandler := b.objHandler != nil
+	hasOwner := b.ownerType != nil
+
+	if !hasHandler && !hasOwner {
+		return nil, fmt.Errorf("dynamicwatch: WithEventHandler or EnqueueForOwner is required for %s", b.crdName)
+	}
+
+	if hasHandler && hasOwner {
+		return nil, fmt.Errorf("dynamicwatch: WithEventHandler and EnqueueForOwner are mutually exclusive for %s", b.crdName)
 	}
 
 	if b.requeueAll == nil {
@@ -251,14 +302,25 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		return nil, fmt.Errorf("registering object cache for %s: %w", b.crdName, addErr)
 	}
 
+	objHandler := b.objHandler
+	if hasOwner {
+		if _, ownerErr := apiutil.GVKForObject(b.ownerType, b.mgr.GetScheme()); ownerErr != nil {
+			return nil, fmt.Errorf("deriving GVK for owner type of %s: %w", b.crdName, ownerErr)
+		}
+
+		objHandler = handler.TypedEnqueueRequestForOwner[T](
+			b.mgr.GetScheme(), b.mgr.GetRESTMapper(), b.ownerType, b.ownerOpts...)
+	}
+
 	w := &Watcher[T]{
-		crdName:      b.crdName,
-		gvk:          gvk,
-		objCache:     objCache,
-		crdCache:     crdCache,
-		objectMapper: b.objectMapper,
-		requeueAll:   b.requeueAll,
-		newT:         newT,
+		crdName:    b.crdName,
+		gvk:        gvk,
+		objCache:   objCache,
+		crdCache:   crdCache,
+		objHandler: objHandler,
+		predicates: b.predicates,
+		requeueAll: b.requeueAll,
+		newT:       newT,
 	}
 
 	return w, nil
@@ -271,13 +333,14 @@ var _ source.SyncingSource = (*Watcher[client.Object])(nil)
 // It implements [source.SyncingSource] so it can be passed directly to
 // [builder.Builder.WatchesRawSource].
 type Watcher[T client.Object] struct {
-	crdName      string
-	gvk          schema.GroupVersionKind
-	objCache     cache.Cache
-	crdCache     cache.Cache
-	objectMapper handler.TypedMapFunc[T, reconcile.Request]
-	requeueAll   RequeueParentsFn
-	newT         func() T
+	crdName    string
+	gvk        schema.GroupVersionKind
+	objCache   cache.Cache
+	crdCache   cache.Cache
+	objHandler handler.TypedEventHandler[T, reconcile.Request]
+	predicates []predicate.TypedPredicate[T]
+	requeueAll RequeueParentsFn
+	newT       func() T
 
 	// startSource is set by Start. It starts a sub-source using the
 	// controller's lifecycle context and queue, both captured at Start time.
@@ -359,9 +422,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) State {
 	log := logf.FromContext(ctx)
 
 	if !w.watching {
-		src := source.Kind(w.objCache, w.newT(),
-			handler.TypedEnqueueRequestsFromMapFunc(w.objectMapper),
-		)
+		src := source.Kind(w.objCache, w.newT(), w.objHandler, w.predicates...)
 
 		if err := w.startSource(src); err != nil {
 			log.Error(err, "Failed to start dynamic watch", "crd", w.crdName)

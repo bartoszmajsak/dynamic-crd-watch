@@ -73,11 +73,24 @@ A Watcher is built with a fluent API that mirrors controller-runtime's builder:
 crdCache, _ := dynamicwatch.NewCRDCache(mgr)
 
 w, err := dynamicwatch.For[*v1alpha1.PluginConfig](mgr, "pluginconfigs.demo.example.com").
-    WithCRDCache(crdCache).                            // optional: share one CRD informer
-    EnqueueOnObjectChange(r.pluginConfigToWidgets).     // PluginConfig created/updated/deleted
-    EnqueueOnCRDChange(r.allWidgetsWithPluginRef).      // CRD itself appears/disappears
+    WithCRDCache(crdCache).
+    WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.pluginConfigToWidgets)).
+    EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
     Build()
 ```
+
+If the dynamic resource is something your controller *creates* (the dynamic equivalent of `builder.Owns()`), use `EnqueueForOwner` instead. It maps child events back to the owning parent - same as you'd expect:
+
+```go
+routeWatch, err := dynamicwatch.For[*networkingv1.HTTPRoute](mgr, "httproutes.gateway.networking.k8s.io").
+    WithCRDCache(crdCache).
+    EnqueueForOwner(&v1alpha1.Widget{}, handler.OnlyControllerOwner()).
+    WithPredicates(predicate.GenerationChangedPredicate{}).  // optional: filter events
+    EnqueueOnCRDChange(r.allWidgets).
+    Build()
+```
+
+Pick one - `WithEventHandler` or `EnqueueForOwner`. You can't set both. `WithPredicates` works with either and filters events before they hit the handler.
 
 The Watcher implements `source.SyncingSource`, so it plugs directly into the controller builder:
 
