@@ -68,15 +68,15 @@ func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
     // ...
 
     switch r.optionalWatch.Ensure(ctx) {
-    case dynamicwatch.JustRegistered:
-        // Watch was just created - informer cache hasn't synced yet.
-        // Requeue to let it catch up.
-        return ctrl.Result{RequeueAfter: time.Second}, nil
-    case dynamicwatch.NotAvailable:
+    case dynamicwatch.Unavailable:
         // CRD not installed - set a condition and move on.
-        return ctrl.Result{}, r.setNotAvailableCondition(ctx, obj)
-    case dynamicwatch.Active:
-        // Watch is running, proceed to read.
+        return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
+    case dynamicwatch.Syncing:
+        // Watch registered, informer cache catching up. Short requeue to
+        // let the initial LIST complete - the next reconcile checks HasSynced().
+        return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+    case dynamicwatch.Ready:
+        // Cache is synced, proceed to read.
     }
 
     // Read the optional resource through the watcher's cache-aware Get.

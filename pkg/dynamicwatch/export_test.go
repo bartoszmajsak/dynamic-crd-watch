@@ -61,9 +61,19 @@ func SetRequeueAll[T client.Object](w *Watcher[T], fn RequeueParentsFn) {
 
 // SetActive forces the watch into the given state. Useful for setting up
 // preconditions like "watch is already registered" before testing Get,
-// Ensure, or onCRDChange behavior.
+// Ensure, or onCRDChange behavior. Setting active=true also sets the
+// watching flag, since active implies watching.
 func SetActive[T client.Object](w *Watcher[T], active bool) {
 	w.active = active
+	if active {
+		w.watching = true
+	}
+}
+
+// SetWatching forces the watching flag. Use this to simulate the state where
+// a watch source has been registered but the informer hasn't synced yet.
+func SetWatching[T client.Object](w *Watcher[T], watching bool) {
+	w.watching = watching
 }
 
 // SimulateCRDChange calls the unexported onCRDChange handler directly,

@@ -84,17 +84,14 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 	}
 
 	switch r.pluginWatch.Ensure(ctx) {
-	case dynamicwatch.JustRegistered:
-		r.recorder.Eventf(widget, nil, corev1.EventTypeNormal, "PluginWatchRegistered",
-			"RegisterWatch", "Dynamic watch for PluginConfig CRD activated")
-
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	case dynamicwatch.NotAvailable:
+	case dynamicwatch.Unavailable:
 		widget.MarkPluginCRDNotAvailable()
 
 		return ctrl.Result{}, nil
-	case dynamicwatch.Active:
-		// Watch already running, proceed to read PluginConfig.
+	case dynamicwatch.Syncing:
+		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+	case dynamicwatch.Ready:
+		// Watch is synced, proceed to read.
 	}
 
 	plugin := &demov1alpha1.PluginConfig{}
@@ -135,17 +132,14 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 	}
 
 	switch r.themeWatch.Ensure(ctx) {
-	case dynamicwatch.JustRegistered:
-		r.recorder.Eventf(widget, nil, corev1.EventTypeNormal, "ThemeWatchRegistered",
-			"RegisterWatch", "Dynamic watch for Theme CRD activated")
-
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	case dynamicwatch.NotAvailable:
+	case dynamicwatch.Unavailable:
 		widget.MarkThemeCRDNotAvailable()
 
 		return ctrl.Result{}, nil
-	case dynamicwatch.Active:
-		// Watch already running, proceed to read Theme.
+	case dynamicwatch.Syncing:
+		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+	case dynamicwatch.Ready:
+		// Watch is synced, proceed to read.
 	}
 
 	theme := &demov1alpha1.Theme{}

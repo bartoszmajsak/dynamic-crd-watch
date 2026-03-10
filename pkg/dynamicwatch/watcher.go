@@ -45,24 +45,27 @@ import (
 type State int
 
 const (
-	// NotAvailable means the CRD is not installed or the watch could not be registered.
-	NotAvailable State = iota
-	// Active means the watch was already running before this call.
-	Active
-	// JustRegistered means the watch was registered during this call.
-	// The informer cache may not have synced yet - callers should requeue
-	// rather than reading immediately.
-	JustRegistered
+	// Unavailable means the CRD is not installed or the watch could not be registered.
+	Unavailable State = iota
+	// Ready means the watch is running and the informer cache has synced.
+	// It is safe to read from the cache immediately.
+	Ready
+	// Syncing means the watch was registered but the informer has not
+	// completed its initial list yet. The caller should requeue - no
+	// arbitrary delay is needed since the next reconcile will re-check
+	// [cache.Informer.HasSynced] and transition to [Ready] as soon as
+	// the cache is populated.
+	Syncing
 )
 
 func (s State) String() string {
 	switch s {
-	case NotAvailable:
-		return "NotAvailable"
-	case Active:
-		return "Active"
-	case JustRegistered:
-		return "JustRegistered"
+	case Unavailable:
+		return "Unavailable"
+	case Ready:
+		return "Ready"
+	case Syncing:
+		return "Syncing"
 	default:
 		return fmt.Sprintf("State(%d)", int(s))
 	}
@@ -275,9 +278,10 @@ type Watcher[T client.Object] struct {
 	objectMapper handler.TypedMapFunc[T, reconcile.Request]
 	requeueAll   RequeueParentsFn
 	newT         func() T
-	mu           sync.Mutex
-	active       bool
-	crdExists    bool
+	mu        sync.Mutex
+	watching  bool // source registered via Watch (may not be synced yet)
+	active    bool // informer synced - safe to read
+	crdExists bool
 }
 
 // Register adds a CRD watch to the controller builder. Events are filtered
@@ -319,46 +323,68 @@ func (w *Watcher[T]) Bind(ctrl WatchRegistrar) {
 // CRD availability is tracked via an event-driven flag set by
 // [Watcher.onCRDChange] - no discovery API calls are made.
 //
-// The mutex is held during [WatchRegistrar.Watch] to prevent double
-// registration from concurrent reconciles. This is safe because
-// controller-runtime's Watch is non-blocking (it adds a source to
-// the controller's internal list). If a custom WatchRegistrar blocks,
-// it will delay concurrent [Watcher.Get], [Watcher.Available], and
-// [Watcher.onCRDChange] calls until registration completes.
+// Registration is a two-phase process: first, the watch source is
+// registered via [WatchRegistrar.Watch] (non-blocking). Then, on
+// this or a subsequent call, Ensure checks whether the informer has
+// completed its initial list via [cache.Informer.HasSynced]. Only
+// after sync does Ensure return [Ready]. This avoids blocking the
+// reconcile worker and prevents deadlocks with [Watcher.onCRDChange].
+//
+// The caller does not need to distinguish "just registered" from
+// "already synced" - if the informer hasn't synced yet, Ensure returns
+// [Syncing] and the caller should requeue after a short delay.
 func (w *Watcher[T]) Ensure(ctx context.Context) State {
 	if w.ctrl == nil {
 		logf.FromContext(ctx).Error(nil, "Bind() not called, cannot register watch", "crd", w.crdName)
 
-		return NotAvailable
+		return Unavailable
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.active {
-		return Active
+		return Ready
 	}
 
 	if !w.crdExists {
-		return NotAvailable
+		return Unavailable
 	}
 
 	log := logf.FromContext(ctx)
 
-	src := source.Kind(w.cache, w.newT(),
-		handler.TypedEnqueueRequestsFromMapFunc(w.objectMapper),
-	)
+	// Phase 1: register the watch source if not already done.
+	if !w.watching {
+		src := source.Kind(w.cache, w.newT(),
+			handler.TypedEnqueueRequestsFromMapFunc(w.objectMapper),
+		)
 
-	if err := w.ctrl.Watch(src); err != nil {
-		log.Error(err, "Failed to register dynamic watch", "crd", w.crdName)
+		if err := w.ctrl.Watch(src); err != nil {
+			log.Error(err, "Failed to register dynamic watch", "crd", w.crdName)
 
-		return NotAvailable
+			return Unavailable
+		}
+
+		w.watching = true
+		log.Info("Registered dynamic watch, waiting for informer sync", "crd", w.crdName)
+	}
+
+	// Phase 2: check if the informer has synced (non-blocking).
+	informer, err := w.cache.GetInformer(ctx, w.newT(), cache.BlockUntilSynced(false))
+	if err != nil {
+		log.Error(err, "Failed to get informer", "crd", w.crdName)
+
+		return Unavailable
+	}
+
+	if !informer.HasSynced() {
+		return Syncing
 	}
 
 	w.active = true
-	log.Info("Dynamically registered watch", "crd", w.crdName)
+	log.Info("Dynamic watch ready", "crd", w.crdName)
 
-	return JustRegistered
+	return Ready
 }
 
 // Get reads an object of type T from the cache. If the informer was removed
@@ -372,6 +398,7 @@ func (w *Watcher[T]) Get(ctx context.Context, key client.ObjectKey, obj T) error
 		var notCached *cache.ErrResourceNotCached
 		if errors.As(err, &notCached) {
 			w.mu.Lock()
+			w.watching = false
 			w.active = false
 			// Reset crdExists because ErrResourceNotCached only occurs after
 			// onCRDChange called RemoveInformer due to CRD removal. A subsequent
@@ -408,7 +435,7 @@ func (w *Watcher[T]) Available() bool {
 // the CRD was installed and removed before any reconcile called Ensure),
 // the handler returns nil - there are no informers to tear down and no
 // cached objects to invalidate, so requeueing would only cause
-// unnecessary reconciles that hit Ensure() → NotAvailable.
+// unnecessary reconciles that hit Ensure() → Unavailable.
 //
 // The Established condition check catches CRD deletion mid-flight:
 // during deletion, Kubernetes updates the CRD status (setting
@@ -421,12 +448,14 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 	crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 	if crdRemoved {
 		w.mu.Lock()
-		wasActive := w.active
+		wasWatching := w.watching
+		wasReady := w.active
+		w.watching = false
 		w.active = false
 		w.crdExists = false
 		w.mu.Unlock()
 
-		if wasActive {
+		if wasWatching {
 			if err := w.cache.RemoveInformer(ctx, w.newT()); err != nil {
 				log.Error(err, "Failed to remove informer", "crd", w.crdName)
 			}
@@ -436,7 +465,7 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 
 		// Only requeue if the watch was active - if it was never registered,
 		// there are no cached objects to invalidate and no state to re-evaluate.
-		if !wasActive {
+		if !wasReady {
 			return nil
 		}
 	} else {
