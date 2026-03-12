@@ -29,7 +29,7 @@ import (
 //
 // Only the essential dependency (cache) is a parameter. GVK, event handler,
 // requeue function, and newT are defaulted to safe no-ops. Use
-// SetCRDExists, SetRequeueAll, and SetStarted to override behavior
+// SetCRDExists, SetRequeueAll, and SetStartSource to override behavior
 // for specific test scenarios.
 func NewTestWatcher[T client.Object](
 	crdName string,
@@ -43,15 +43,6 @@ func NewTestWatcher[T client.Object](
 		),
 		requeueAll: func(_ context.Context) []reconcile.Request { return nil },
 		newT:       newInstance[T],
-	}
-}
-
-// SetStarted simulates the post-Start state by setting the startSource
-// closure. This is the equivalent of the controller framework calling
-// Start on the source.
-func SetStarted[T client.Object](w *Watcher[T]) {
-	w.startSource = func(src source.SyncingSource) error {
-		return src.Start(context.Background(), nil)
 	}
 }
 
@@ -90,6 +81,32 @@ func SetActive[T client.Object](w *Watcher[T], active bool) {
 // a watch source has been registered but the informer hasn't synced yet.
 func SetWatching[T client.Object](w *Watcher[T], watching bool) {
 	w.watching = watching
+}
+
+// SetGeneration sets the generation counter. Use this to test that stale
+// sync waiters don't promote the watcher after a teardown.
+func SetGeneration[T client.Object](w *Watcher[T], gen uint64) {
+	w.generation = gen
+}
+
+// Generation returns the current generation counter value.
+func Generation[T client.Object](w *Watcher[T]) uint64 {
+	return w.generation
+}
+
+// SetStartSyncWaiter replaces the startSyncWaiter closure. Use this in
+// tests that need to exercise the background sync waiter goroutine
+// (waitForSyncAndRequeue) through Ensure().
+func SetStartSyncWaiter[T client.Object](w *Watcher[T], fn func(gen uint64, src source.SyncingSource)) {
+	w.startSyncWaiter = fn
+}
+
+// Watching returns the current watching flag under the mutex.
+func Watching[T client.Object](w *Watcher[T]) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.watching
 }
 
 // SimulateCRDChange calls the unexported onCRDChange handler directly,

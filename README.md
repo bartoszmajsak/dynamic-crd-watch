@@ -110,16 +110,11 @@ In your `Reconcile` method, call `Ensure` to check availability and register the
 func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     // ...
 
-    switch r.optionalWatch.Ensure(ctx) {
-    case dynamicwatch.Unavailable:
-        // CRD not installed - set a condition and move on.
+    if !r.optionalWatch.Ensure(ctx) {
+        // CRD not installed or informer still syncing - set a condition
+        // and move on. The watcher will requeue affected objects
+        // automatically once the cache is ready.
         return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
-    case dynamicwatch.Syncing:
-        // Watch registered, informer cache catching up. Short requeue to
-        // let the initial LIST complete - the next reconcile checks HasSynced().
-        return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-    case dynamicwatch.Ready:
-        // Cache is synced, proceed to read.
     }
 
     // Read the optional resource through the watcher's cache-aware Get.

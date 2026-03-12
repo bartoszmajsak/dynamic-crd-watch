@@ -85,15 +85,10 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 		return ctrl.Result{}, nil
 	}
 
-	switch r.pluginWatch.Ensure(ctx) {
-	case dynamicwatch.Unavailable:
+	if !r.pluginWatch.Ensure(ctx) {
 		widget.MarkPluginCRDNotAvailable()
 
 		return ctrl.Result{}, nil
-	case dynamicwatch.Syncing:
-		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-	case dynamicwatch.Ready:
-		// Watch is synced, proceed to read.
 	}
 
 	plugin := &demov1alpha1.PluginConfig{}
@@ -133,15 +128,10 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 		return ctrl.Result{}, nil
 	}
 
-	switch r.themeWatch.Ensure(ctx) {
-	case dynamicwatch.Unavailable:
+	if !r.themeWatch.Ensure(ctx) {
 		widget.MarkThemeCRDNotAvailable()
 
 		return ctrl.Result{}, nil
-	case dynamicwatch.Syncing:
-		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-	case dynamicwatch.Ready:
-		// Watch is synced, proceed to read.
 	}
 
 	theme := &demov1alpha1.Theme{}
