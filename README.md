@@ -104,33 +104,38 @@ The Watcher implements `source.SyncingSource`, so it plugs directly into the bui
 
 ### Reconcile loop
 
-In your `Reconcile` method, call `Ensure` to check availability and register the watch if the CRD just appeared:
+In your `Reconcile` method, use `TryGet` to check CRD availability and read the object in one call:
 
 ```go
 func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     // ...
 
-    if !r.optionalWatch.Ensure(ctx) {
-        // CRD not installed or informer still syncing - set a condition
-        // and move on. The watcher will requeue affected objects
-        // automatically once the cache is ready.
-        return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
-    }
-
-    // Read the optional resource through the watcher's cache-aware Get.
     optional := &v1alpha1.OptionalResource{}
-    if err := r.optionalWatch.Get(ctx, key, optional); err != nil {
-        if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
-            // Informer was removed between Ensure and Get (race).
-            // Watcher already reset its state - just requeue.
-            return ctrl.Result{RequeueAfter: time.Second}, nil
+    available, err := r.optionalWatch.TryGet(ctx, key, optional)
+    if err != nil {
+        if client.IgnoreNotFound(err) == nil {
+            return ctrl.Result{}, r.setNotFoundCondition(ctx, obj)
         }
         return ctrl.Result{}, err
+    }
+    if !available {
+        // CRD not installed or informer still syncing.
+        // The watcher will requeue affected objects automatically
+        // once the cache is ready.
+        return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
     }
 
     // Use optional...
 }
 ```
+
+`TryGet` calls `Ensure` internally and absorbs cache invalidation races - you never need to handle them yourself. The return values are:
+
+- `(true, nil)` - object found
+- `(true, err)` - CRD available but cache error (e.g. `NotFound`)
+- `(false, nil)` - CRD unavailable or informer removed mid-read
+
+There's also `TryList` with the same semantics for listing objects.
 
 ### Prerequisites
 
@@ -156,9 +161,9 @@ Check both:
 crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 ```
 
-### The `RemoveInformer` / `Get` race
+### The `RemoveInformer` / read race (handled for you)
 
-If `RemoveInformer` fires between `Ensure()` returning `Ready` and `Watcher.Get()`, the cache returns `ErrResourceNotCached`. The Watcher catches this automatically and returns `ErrCacheInvalidated` - the caller just needs to requeue. Miss it and you're back to a deadlocked controller.
+If `RemoveInformer` fires between `Ensure()` returning ready and the cache read, the cache returns `ErrResourceNotCached`. The Watcher catches this internally - `TryGet`/`TryList` return `(false, nil)`, indistinguishable from "CRD not installed". The watcher resets its state and requeues affected parents automatically. No special handling needed in your reconciler.
 
 ## Quick start
 

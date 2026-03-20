@@ -59,7 +59,7 @@ stateDiagram-v2
     Unavailable --> Ready: Ensure() starts source\n+ informer syncs
     Ready --> Unavailable: onCRDChange detects removal\nRemoveInformer()
 
-    Ready --> Unavailable: Get() hits ErrResourceNotCached
+    Ready --> Unavailable: TryGet/TryList hits ErrResourceNotCached\n(handled internally)
 ```
 
 - **Unavailable** (`Ensure()` returns `false`) - CRD not installed, watch torn down, or informer still syncing. When a new watch is registered, it waits for sync and auto-requeues affected parents.
@@ -102,21 +102,22 @@ ctrl.NewControllerManagedBy(mgr).
 ## Using a Watcher in Reconcile loop
 
 ```go
-if !r.pluginWatch.Ensure(ctx) {
-    // CRD not installed or informer still syncing.
-    // The watcher will requeue us automatically once the cache is ready.
-    widget.MarkPluginCRDNotAvailable()
-    return ctrl.Result{}, nil
-}
-
 plugin := &v1alpha1.PluginConfig{}
-if err := r.pluginWatch.Get(ctx, key, plugin); err != nil {
-    if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
-        return ctrl.Result{RequeueAfter: time.Second}, nil  // race - requeue
+available, err := r.pluginWatch.TryGet(ctx, key, plugin)
+if err != nil {
+    if client.IgnoreNotFound(err) == nil {
+        widget.MarkPluginNotFound(widget.Spec.PluginRef)
+        return ctrl.Result{}, nil
     }
     return ctrl.Result{}, err
 }
+if !available {
+    widget.MarkPluginCRDNotAvailable()
+    return ctrl.Result{}, nil
+}
 ```
+
+`TryGet` calls `Ensure` internally and absorbs `ErrResourceNotCached` races, returning `(false, nil)` instead. Callers never see cache invalidation errors.
 
 ## Key Design Decisions
 
@@ -124,7 +125,7 @@ if err := r.pluginWatch.Get(ctx, key, plugin); err != nil {
 
 Each Watcher creates its own `cache.Cache` for type T, separate from the manager's shared cache. Without this, two controllers in the same manager watching the same optional GVK (e.g. `KnativeService` watched by both `InferenceServiceReconciler` and `InferenceGraphReconciler`) would break each other - one controller's `RemoveInformer` kills the informer for both.
 
-The private cache uses `ReaderFailOnMissingInformer: true`. Without this flag, `Get()` after `RemoveInformer()` silently creates a *new* informer that tries to list/watch a dead API and blocks forever. With it, you get `ErrResourceNotCached`, which `Watcher.Get()` translates to `ErrCacheInvalidated`.
+The private cache uses `ReaderFailOnMissingInformer: true`. Without this flag, `Get()` after `RemoveInformer()` silently creates a *new* informer that tries to list/watch a dead API and blocks forever. With it, you get `ErrResourceNotCached`, which `TryGet`/`TryList` absorb as `(false, nil)`.
 
 ### CRD deletion race
 
@@ -136,9 +137,13 @@ The fix checks both signals:
 crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 ```
 
-### TOCTOU between `Ensure()` and `Get()`
+### TOCTOU between `Ensure()` and cache read
 
-The CRD could be removed between `Ensure()` returning `true` and the `Get()` call. When this happens, `RemoveInformer` fires from `onCRDChange`, and `Get()` hits `ErrResourceNotCached`. The Watcher resets its state, increments the generation counter (so stale sync goroutines don't promote), and returns `ErrCacheInvalidated`. Rare in practice, trivial to hit in tests with rapid install/remove cycles.
+The CRD could be removed between `Ensure()` returning `true` and the cache read. When this happens, `RemoveInformer` fires from `onCRDChange`, and the read hits `ErrResourceNotCached`. The Watcher resets its state, increments the generation counter (so stale sync goroutines don't promote), and `TryGet`/`TryList` return `(false, nil)` - indistinguishable from "CRD not installed" at the consumer level. Rare in practice, trivial to hit in tests with rapid install/remove cycles.
+
+### cancelSyncWaiter race fix
+
+The timeout context for `waitForSyncAndRequeue` is created in `Ensure()` under the mutex and passed to the goroutine, not created inside the goroutine. This eliminates the window where `onCRDChange` couldn't cancel an in-flight sync waiter (previously up to 30s wasted blocking). The goroutine nils `cancelSyncWaiter` on both success and failure paths to keep the state unambiguous.
 
 ### Generation counter
 
@@ -160,8 +165,8 @@ Tests use envtest with Ginkgo v2 and run in three modes:
 
 - Only Widget CRD installed at startup. PluginConfig and Theme CRDs are installed/removed dynamically to exercise the full lifecycle.
 - `directClient` bypasses the manager cache for CRD operations since CRD informers live in each Watcher's private cache.
-- Unit tests use the `export_test.go` pattern for state injection (`SetStartSource`, `SetCRDExists`, `SimulateCRDChange`) without coupling to struct layout.
-- Concurrency tests (`Ensure` + `onCRDChange`, `Get` + `onCRDChange`) run with `-race`.
+- Unit tests use the `export_test.go` pattern for state injection (`SetCRDExists`, `SetActive`, `SimulateCRDChange`, `CallWaitForSyncAndRequeue`) without coupling to struct layout.
+- Concurrency tests (`Ensure` + `onCRDChange`, `TryGet` + `onCRDChange`) run with `-race`.
 - The interesting tests are the lifecycle ones: install/remove/reinstall cycles, shared CRDCache isolation, rapid remove/reinstall races. If you can install and remove a CRD three times without the controller hanging, you're in good shape.
 
 ## Project Layout
