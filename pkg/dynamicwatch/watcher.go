@@ -13,7 +13,10 @@
 // to set any special options on their manager cache.
 //
 // A Watcher implements [source.SyncingSource], so it plugs directly into the
-// controller builder:
+// controller builder. Use [Watcher.TryGet] and [Watcher.TryList] in your
+// reconciler to read objects from the dynamic cache - they handle CRD
+// availability checks, informer lifecycle, and cache invalidation races
+// internally.
 //
 //	w, err := dynamicwatch.For[*v1alpha1.PluginConfig](mgr, "pluginconfigs.demo.example.com").
 //	    WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.pluginConfigToWidgets)).
@@ -35,6 +38,7 @@ import (
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -222,6 +226,53 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 	return false
 }
 
+// TryGet combines [Watcher.Ensure] and a cache read in one call. It returns
+// (true, nil) when the object was found, (true, err) on cache errors other
+// than informer removal, and (false, nil) when the CRD is unavailable or
+// the informer was removed mid-read. On false, the caller should skip
+// the optional-CRD logic and return early - the watcher will requeue
+// automatically once the cache is ready again.
+func (w *Watcher[T]) TryGet(ctx context.Context, key client.ObjectKey, obj T) (bool, error) {
+	if !w.Ensure(ctx) {
+		return false, nil
+	}
+
+	if err := w.get(ctx, key, obj); err != nil {
+		if errors.Is(err, errCacheInvalidated) {
+			return false, nil
+		}
+
+		return true, err
+	}
+
+	return true, nil
+}
+
+// TryList combines [Watcher.Ensure] and a cache list in one call. It returns
+// (true, nil) when the list succeeded, (true, err) on cache errors other
+// than informer removal, and (false, nil) when the CRD is unavailable or
+// the informer was removed mid-read. On false, the list is cleared and
+// the caller should skip the optional-CRD logic.
+func (w *Watcher[T]) TryList(ctx context.Context, list client.ObjectList, opts ...client.ListOption) (bool, error) {
+	if !w.Ensure(ctx) {
+		clearList(list)
+
+		return false, nil
+	}
+
+	if err := w.list(ctx, list, opts...); err != nil {
+		if errors.Is(err, errCacheInvalidated) {
+			clearList(list)
+
+			return false, nil
+		}
+
+		return true, err
+	}
+
+	return true, nil
+}
+
 // get reads an object of type T from the cache. If the informer was removed
 // between [Watcher.Ensure] and this call (the RemoveInformer/get race), the
 // watcher resets its internal state and returns [errCacheInvalidated]. The
@@ -230,6 +281,21 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 // All other errors (including NotFound) are returned as-is.
 func (w *Watcher[T]) get(ctx context.Context, key client.ObjectKey, obj T) error {
 	if err := w.objCache.Get(ctx, key, obj); err != nil {
+		var notCached *cache.ErrResourceNotCached
+		if errors.As(err, &notCached) {
+			w.handleCacheInvalidated()
+
+			return errCacheInvalidated
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (w *Watcher[T]) list(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := w.objCache.List(ctx, list, opts...); err != nil {
 		var notCached *cache.ErrResourceNotCached
 		if errors.As(err, &notCached) {
 			w.handleCacheInvalidated()
@@ -447,4 +513,15 @@ func isCRDEstablished(crd *apiextensionsv1.CustomResourceDefinition) bool {
 	}
 
 	return false
+}
+
+func clearList(list client.ObjectList) {
+	if err := meta.SetList(list, nil); err != nil {
+		items := reflect.ValueOf(list).Elem().FieldByName("Items")
+		if items.IsValid() && items.CanSet() {
+			items.Set(reflect.MakeSlice(items.Type(), 0, 0))
+		}
+	}
+
+	list.SetRemainingItemCount(nil)
 }
