@@ -79,7 +79,7 @@ func NewCRDCache(mgr ctrl.Manager) (*CRDCache, error) {
 		Mapper:     mgr.GetRESTMapper(),
 		ByObject: map[client.Object]cache.ByObject{
 			&apiextensionsv1.CustomResourceDefinition{}: {
-				Transform: stripCRDSpec,
+				Transform: transformCRDForCache,
 			},
 		},
 	})
@@ -444,13 +444,17 @@ func crdNamePredicate(name string) predicate.TypedPredicate[*apiextensionsv1.Cus
 	})
 }
 
-// stripCRDSpec is a cache transform that removes the spec from CRD objects
-// before they are stored in the informer's in-memory store. CRD specs contain
-// large OpenAPI schemas (validation, versions) that we never read - we only
-// need metadata (name, deletionTimestamp) and status (Established condition).
-func stripCRDSpec(obj any) (any, error) {
+// transformCRDForCache is a cache transform that strips bulky fields from CRD objects
+// before they are stored in the informer's in-memory store. It removes spec
+// (large OpenAPI schemas), managed fields, and annotations (which often carry
+// kubectl.kubernetes.io/last-applied-configuration duplicating the entire spec
+// as JSON). We only need metadata (name, deletionTimestamp) and status
+// (Established condition).
+func transformCRDForCache(obj any) (any, error) {
 	if crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
 		crd.Spec = apiextensionsv1.CustomResourceDefinitionSpec{}
+		crd.ManagedFields = nil
+		crd.Annotations = nil
 	}
 
 	return obj, nil

@@ -179,7 +179,7 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 			ByObject: map[client.Object]cache.ByObject{
 				&apiextensionsv1.CustomResourceDefinition{}: {
 					Field:     fields.OneTermEqualSelector("metadata.name", b.crdName),
-					Transform: stripCRDSpec,
+					Transform: transformCRDForCache,
 				},
 			},
 		})

@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-func TestStripCRDSpec_RemovesSpec_PreservesStatusAndMetadata(t *testing.T) {
+func TestTransformCRDForCache_RemovesSpec_PreservesStatusAndMetadata(t *testing.T) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "example.com",
@@ -25,7 +25,7 @@ func TestStripCRDSpec_RemovesSpec_PreservesStatusAndMetadata(t *testing.T) {
 	}
 	crd.Name = "widgets.example.com"
 
-	result, err := stripCRDSpec(crd)
+	result, err := transformCRDForCache(crd)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,13 +51,13 @@ func TestStripCRDSpec_RemovesSpec_PreservesStatusAndMetadata(t *testing.T) {
 	}
 
 	if !isCRDEstablished(stripped) {
-		t.Error("expected isCRDEstablished to return true after stripCRDSpec")
+		t.Error("expected isCRDEstablished to return true after transformCRDForCache")
 	}
 }
 
-func TestStripCRDSpec_NonCRDObject_PassesThrough(t *testing.T) {
+func TestTransformCRDForCache_NonCRDObject_PassesThrough(t *testing.T) {
 	obj := "not a CRD"
-	result, err := stripCRDSpec(obj)
+	result, err := transformCRDForCache(obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
