@@ -15,6 +15,7 @@ import (
 	"context"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -23,15 +24,29 @@ import (
 )
 
 // NewTestWatcher creates a Watcher for unit testing without requiring a
-// ctrl.Manager. In production, Build() derives the GVK from the scheme,
-// creates a CRD objCache, etc. - none of which is needed (or desirable)
-// in a unit test.
-//
-// Only the essential dependency (cache) is a parameter. GVK, event handler,
-// requeue function, and newT are defaulted to safe no-ops. Use
-// SetCRDExists, SetRequeueAll, and SetStartSource to override behavior
-// for specific test scenarios.
+// ctrl.Manager. Sets started=true and stores the given ctx so Ensure()
+// works without calling Start().
 func NewTestWatcher[T client.Object](
+	crdName string,
+	c cache.Cache,
+	ctx context.Context,
+) *Watcher[T] {
+	return &Watcher[T]{
+		crdName:  crdName,
+		objCache: c,
+		ctx:      ctx,
+		started:  true,
+		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
+			func(_ context.Context, _ T) []reconcile.Request { return nil },
+		),
+		requeueAll: func(_ context.Context) []reconcile.Request { return nil },
+		newT:       newInstance[T],
+	}
+}
+
+// NewUnstartedTestWatcher creates a Watcher without setting started=true.
+// Use this to test the Ensure-before-Start panic path.
+func NewUnstartedTestWatcher[T client.Object](
 	crdName string,
 	c cache.Cache,
 ) *Watcher[T] {
@@ -46,11 +61,12 @@ func NewTestWatcher[T client.Object](
 	}
 }
 
-// SetStartSource replaces the startSource closure directly. Use this to
-// inject failures or count calls in tests that need fine-grained control
-// over the source startup behavior.
-func SetStartSource[T client.Object](w *Watcher[T], fn func(src source.SyncingSource) error) {
-	w.startSource = fn
+// SetStarted marks the watcher as started with the given context.
+// Use this when a test needs to transition from unstarted to started
+// without going through the real Start() method.
+func SetStarted[T client.Object](w *Watcher[T], ctx context.Context) {
+	w.ctx = ctx
+	w.started = true
 }
 
 // SetCRDExists sets the event-driven CRD existence flag.
@@ -67,7 +83,7 @@ func SetRequeueAll[T client.Object](w *Watcher[T], fn RequeueParentsFn) {
 }
 
 // SetActive forces the watch into the given state. Useful for setting up
-// preconditions like "watch is already registered" before testing Get,
+// preconditions like "watch is already registered" before testing TryGet,
 // Ensure, or onCRDChange behavior. Setting active=true also sets the
 // watching flag, since active implies watching.
 func SetActive[T client.Object](w *Watcher[T], active bool) {
@@ -94,11 +110,10 @@ func Generation[T client.Object](w *Watcher[T]) uint64 {
 	return w.generation
 }
 
-// SetStartSyncWaiter replaces the startSyncWaiter closure. Use this in
-// tests that need to exercise the background sync waiter goroutine
-// (waitForSyncAndRequeue) through Ensure().
-func SetStartSyncWaiter[T client.Object](w *Watcher[T], fn func(gen uint64, src source.SyncingSource)) {
-	w.startSyncWaiter = fn
+// SetQueue sets the work queue on the watcher. Tests that need to inspect
+// queue contents or whose code paths call w.queue.Add should set this.
+func SetQueue[T client.Object](w *Watcher[T], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	w.queue = q
 }
 
 // Watching returns the current watching flag under the mutex.
@@ -115,4 +130,12 @@ func Watching[T client.Object](w *Watcher[T]) bool {
 // isolation, without needing a running informer for the CRD type.
 func SimulateCRDChange[T client.Object](w *Watcher[T], ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) []reconcile.Request {
 	return w.onCRDChange(ctx, crd)
+}
+
+// CallWaitForSyncAndRequeue exposes waitForSyncAndRequeue for direct testing.
+func CallWaitForSyncAndRequeue[T client.Object](
+	w *Watcher[T], syncCtx context.Context, syncCancel context.CancelFunc,
+	gen uint64, src source.SyncingSource,
+) {
+	w.waitForSyncAndRequeue(syncCtx, syncCancel, gen, src)
 }
