@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -37,7 +34,6 @@ type WidgetReconciler struct {
 	client.Client
 
 	Scheme      *runtime.Scheme
-	recorder    events.EventRecorder
 	pluginWatch *dynamicwatch.Watcher[*demov1alpha1.PluginConfig]
 	themeWatch  *dynamicwatch.Watcher[*demov1alpha1.Theme]
 }
@@ -85,23 +81,11 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 		return ctrl.Result{}, nil
 	}
 
-	if !r.pluginWatch.Ensure(ctx) {
-		widget.MarkPluginCRDNotAvailable()
-
-		return ctrl.Result{}, nil
-	}
-
 	plugin := &demov1alpha1.PluginConfig{}
 	pluginKey := client.ObjectKey{Name: widget.Spec.PluginRef, Namespace: widget.Namespace}
 
-	if err := r.pluginWatch.Get(ctx, pluginKey, plugin); err != nil {
-		if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
-			r.recorder.Eventf(widget, nil, corev1.EventTypeWarning, "PluginCacheInvalidated",
-				"CacheInvalidated", "PluginConfig informer was removed during reconciliation; requeuing")
-
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-
+	available, err := r.pluginWatch.TryGet(ctx, pluginKey, plugin)
+	if err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced PluginConfig not found", "pluginRef", widget.Spec.PluginRef)
 			widget.MarkPluginNotFound(widget.Spec.PluginRef)
@@ -110,6 +94,12 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 		}
 
 		return ctrl.Result{}, err
+	}
+
+	if !available {
+		widget.MarkPluginCRDNotAvailable()
+
+		return ctrl.Result{}, nil
 	}
 
 	log.Info("Applied PluginConfig", "pluginRef", widget.Spec.PluginRef, "setting", plugin.Spec.Setting)
@@ -128,23 +118,11 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 		return ctrl.Result{}, nil
 	}
 
-	if !r.themeWatch.Ensure(ctx) {
-		widget.MarkThemeCRDNotAvailable()
-
-		return ctrl.Result{}, nil
-	}
-
 	theme := &demov1alpha1.Theme{}
 	themeKey := client.ObjectKey{Name: widget.Spec.ThemeRef, Namespace: widget.Namespace}
 
-	if err := r.themeWatch.Get(ctx, themeKey, theme); err != nil {
-		if errors.Is(err, dynamicwatch.ErrCacheInvalidated) {
-			r.recorder.Eventf(widget, nil, corev1.EventTypeWarning, "ThemeCacheInvalidated",
-				"CacheInvalidated", "Theme informer was removed during reconciliation; requeuing")
-
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
-
+	available, err := r.themeWatch.TryGet(ctx, themeKey, theme)
+	if err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced Theme not found", "themeRef", widget.Spec.ThemeRef)
 			widget.MarkThemeNotFound(widget.Spec.ThemeRef)
@@ -153,6 +131,12 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 		}
 
 		return ctrl.Result{}, err
+	}
+
+	if !available {
+		widget.MarkThemeCRDNotAvailable()
+
+		return ctrl.Result{}, nil
 	}
 
 	log.Info("Applied Theme", "themeRef", widget.Spec.ThemeRef, "colorScheme", theme.Spec.ColorScheme)
@@ -269,8 +253,6 @@ func (r *WidgetReconciler) allWidgetsWithThemeRef(ctx context.Context) []reconci
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.recorder = mgr.GetEventRecorder("widget-controller")
-
 	crdCache, err := dynamicwatch.NewCRDCache(mgr)
 	if err != nil {
 		return fmt.Errorf("creating shared CRD cache: %w", err)
