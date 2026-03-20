@@ -108,14 +108,12 @@ type Watcher[T client.Object] struct {
 	requeueAll RequeueParentsFn
 	newT       func() T
 
-	// startSource is set by Start. It starts a sub-source using the
-	// controller's lifecycle context and queue, both captured at Start time.
-	startSource func(src source.SyncingSource) error
-	// startSyncWaiter is set by Start. It spawns a goroutine that blocks
-	// until the source's informer has synced, then promotes to active and
-	// enqueues all affected parents. Nil in unit tests.
-	startSyncWaiter func(gen uint64, src source.SyncingSource)
-	crdSrc          source.SyncingSource
+	// ctx is the controller lifecycle context, set by Start.
+	ctx context.Context
+	// queue is the controller's work queue, set by Start.
+	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
+	started bool
+	crdSrc  source.SyncingSource
 
 	mu               sync.Mutex
 	watching         bool // source registered via Watch (may not be synced yet)
@@ -131,24 +129,25 @@ type Watcher[T client.Object] struct {
 //
 // This method satisfies [source.TypedSource] and must not be called directly.
 func (w *Watcher[T]) Start(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-	if w.startSource != nil {
+	if w.started {
 		return errors.New("dynamicwatch: Start called twice")
 	}
 
-	w.startSource = func(src source.SyncingSource) error {
-		return src.Start(ctx, queue)
-	}
-
-	w.startSyncWaiter = func(gen uint64, src source.SyncingSource) {
-		w.waitForSyncAndRequeue(ctx, queue, gen, src)
-	}
+	w.ctx = ctx
+	w.queue = queue
 
 	w.crdSrc = source.Kind(w.crdCache, &apiextensionsv1.CustomResourceDefinition{},
 		handler.TypedEnqueueRequestsFromMapFunc(w.onCRDChange),
 		crdNamePredicate(w.crdName),
 	)
 
-	return w.crdSrc.Start(ctx, queue)
+	if err := w.crdSrc.Start(ctx, queue); err != nil {
+		return err
+	}
+
+	w.started = true
+
+	return nil
 }
 
 // WaitForSync blocks until the CRD informer has synced, ensuring that the
@@ -180,7 +179,7 @@ func (w *Watcher[T]) WaitForSync(ctx context.Context) error {
 //
 // Panics if called before Start.
 func (w *Watcher[T]) Ensure(ctx context.Context) bool {
-	if w.startSource == nil {
+	if !w.started {
 		panic("dynamicwatch: Ensure called before Start")
 	}
 
@@ -200,7 +199,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 	if !w.watching {
 		src := source.Kind(w.objCache, w.newT(), w.objHandler, w.predicates...)
 
-		if err := w.startSource(src); err != nil {
+		if err := src.Start(w.ctx, w.queue); err != nil {
 			log.Error(err, "Failed to start dynamic watch", "crd", w.crdName)
 
 			return false
@@ -208,15 +207,14 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 
 		w.watching = true
 
-		if w.startSyncWaiter != nil {
-			// Cancel any previous sync waiter that might still be blocking
-			// (e.g. after a timeout-and-retry cycle).
-			if w.cancelSyncWaiter != nil {
-				w.cancelSyncWaiter()
-			}
-
-			go w.startSyncWaiter(w.generation, src)
+		if w.cancelSyncWaiter != nil {
+			w.cancelSyncWaiter()
 		}
+
+		syncCtx, syncCancel := context.WithTimeout(w.ctx, informerSyncTimeout)
+		w.cancelSyncWaiter = syncCancel
+
+		go w.waitForSyncAndRequeue(syncCtx, syncCancel, w.generation, src)
 
 		log.Info("Started dynamic watch, waiting for informer sync", "crd", w.crdName)
 	}
@@ -310,11 +308,8 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 		w.mu.Unlock()
 
 		if wasWatching {
-			// RemoveInformer is called outside the mutex to avoid deadlocks with
-			// potentially blocking cache operations. This is safe because
-			// controller-runtime's internal informer map has its own lock, and
-			// Get's ErrResourceNotCached handling serves as a safety net for
-			// any race between RemoveInformer and concurrent Ensure/Get calls.
+			// RemoveInformer is idempotent - safe to call even if
+			// waitForSyncAndRequeue already removed it.
 			if err := w.objCache.RemoveInformer(ctx, w.newT()); err != nil {
 				log.Error(err, "Failed to remove informer", "crd", w.crdName)
 			}
@@ -357,60 +352,34 @@ const informerSyncTimeout = 30 * time.Second
 // The generation parameter guards against stale promotions: if the CRD is
 // removed while this method is blocking, [Watcher.onCRDChange] increments
 // the generation and the stale goroutine bails without promoting.
-func (w *Watcher[T]) waitForSyncAndRequeue(
-	ctx context.Context,
-	queue workqueue.TypedRateLimitingInterface[reconcile.Request],
-	gen uint64,
-	src source.SyncingSource,
-) {
-	log := logf.FromContext(ctx)
+func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel context.CancelFunc, gen uint64, src source.SyncingSource) {
+	defer syncCancel() // stop the timeout timer
 
-	syncCtx, cancel := context.WithTimeout(ctx, informerSyncTimeout)
+	log := logf.FromContext(w.ctx)
 
-	// Store the cancel func so Ensure() / onCRDChange can abort this goroutine
-	// before spawning a replacement or tearing down the watch.
-	w.mu.Lock()
-	w.cancelSyncWaiter = cancel
-	w.mu.Unlock()
-
-	// Wait on the specific source - not the cache. source.Kind.WaitForSync
-	// blocks until GetInformer completes AND the informer has synced AND the
-	// event handler has received all initial events. In contrast,
-	// cache.WaitForCacheSync returns true immediately when no informers are
-	// registered, which races with the async GetInformer call inside
-	// source.Kind.Start.
 	syncErr := src.WaitForSync(syncCtx)
-	cancel()
 
 	if syncErr != nil {
-		// Timeout, context cancelled, or source startup failure.
 		w.mu.Lock()
 		stale := w.generation != gen
 		if !stale {
 			w.watching = false
+			w.cancelSyncWaiter = nil // goroutine is done
 			log.Info("Informer sync failed, will retry on next Ensure()", "crd", w.crdName, "error", syncErr)
 		}
 		w.mu.Unlock()
 
 		if stale {
-			// Generation advanced (CRD removed while we were syncing).
-			// onCRDChange already handled cleanup - don't touch the informer.
 			return
 		}
 
-		// Remove the stale informer outside the mutex (same pattern as
-		// onCRDChange). Without this, the next Ensure() would register a
-		// second event handler on the existing informer, stacking handlers
-		// on repeated timeouts.
-		if err := w.objCache.RemoveInformer(ctx, w.newT()); err != nil {
+		// RemoveInformer is idempotent - safe to call even if onCRDChange already removed it.
+		if err := w.objCache.RemoveInformer(w.ctx, w.newT()); err != nil {
 			log.Error(err, "Failed to remove informer after sync failure", "crd", w.crdName)
 		}
 
-		// Enqueue parents so they retry. Without this, a transient API
-		// server issue + GenerationChangedPredicate could leave affected
-		// objects stuck indefinitely in CRDNotAvailable.
-		for _, req := range w.requeueAll(ctx) {
-			queue.Add(req)
+		for _, req := range w.requeueAll(w.ctx) {
+			w.queue.Add(req)
 		}
 
 		return
@@ -424,12 +393,13 @@ func (w *Watcher[T]) waitForSyncAndRequeue(
 	}
 
 	w.active = true
+	w.cancelSyncWaiter = nil // goroutine is done
 	w.mu.Unlock()
 
 	log.Info("Dynamic watch ready", "crd", w.crdName)
 
-	for _, req := range w.requeueAll(ctx) {
-		queue.Add(req)
+	for _, req := range w.requeueAll(w.ctx) {
+		w.queue.Add(req)
 	}
 }
 
