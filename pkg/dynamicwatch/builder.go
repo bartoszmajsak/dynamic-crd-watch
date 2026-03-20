@@ -162,7 +162,7 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 
 	newT := newInstance[T]
 
-	gvk, err := apiutil.GVKForObject(newT(), b.mgr.GetScheme())
+	_, err := apiutil.GVKForObject(newT(), b.mgr.GetScheme())
 	if err != nil {
 		return nil, fmt.Errorf("deriving GVK for %s: %w", b.crdName, err)
 	}
@@ -229,7 +229,6 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 
 	w := &Watcher[T]{
 		crdName:    b.crdName,
-		gvk:        gvk,
 		objCache:   objCache,
 		crdCache:   crdCache,
 		objHandler: objHandler,

@@ -35,7 +35,6 @@ import (
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -102,7 +101,6 @@ var _ source.SyncingSource = (*Watcher[client.Object])(nil)
 // [builder.Builder.WatchesRawSource].
 type Watcher[T client.Object] struct {
 	crdName    string
-	gvk        schema.GroupVersionKind
 	objCache   cache.Cache
 	crdCache   cache.Cache
 	objHandler handler.TypedEventHandler[T, reconcile.Request]
