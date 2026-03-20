@@ -177,11 +177,11 @@ func (w *Watcher[T]) WaitForSync(ctx context.Context) error {
 // eliminates the need for callers to implement their own requeue-on-sync
 // logic - just return early on false and the watcher will trigger a
 // re-reconcile once the cache is ready.
+//
+// Panics if called before Start.
 func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 	if w.startSource == nil {
-		logf.FromContext(ctx).Error(nil, "Start() not called, cannot register watch", "crd", w.crdName)
-
-		return false
+		panic("dynamicwatch: Ensure called before Start")
 	}
 
 	w.mu.Lock()

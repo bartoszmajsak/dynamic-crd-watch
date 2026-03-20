@@ -94,12 +94,17 @@ func TestWaitForSync_BeforeStart_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestEnsure_StartNotCalled_ReturnsFalse(t *testing.T) {
+func TestEnsure_BeforeStart_Panics(t *testing.T) {
 	w := newTestWatcher(&fakeCache{})
 
-	if w.Ensure(t.Context()) {
-		t.Error("expected false without Start()")
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on Ensure before Start")
+		}
+	}()
+
+	w.Ensure(t.Context())
 }
 
 func TestEnsure_CRDUnavailable_ReturnsFalse(t *testing.T) {

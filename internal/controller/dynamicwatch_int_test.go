@@ -150,6 +150,12 @@ var _ = Describe("dynamicwatch.Build", func() {
 				WithEventHandler(nil)
 		}).To(PanicWith(ContainSubstring("nil handler")))
 	})
+
+	It("panics when For is called with nil manager", func() {
+		Expect(func() {
+			dynamicwatch.For[*demov1alpha1.PluginConfig](nil, "pluginconfigs.demo.example.com")
+		}).To(PanicWith(ContainSubstring("nil manager")))
+	})
 })
 
 // acceptAllPluginConfigs is a properly typed predicate for use in WithPredicates tests.

@@ -34,7 +34,13 @@ type WatcherBuilder[T client.Object] struct {
 // Its GVK is derived automatically from the manager's scheme.
 //
 // The crdName is the fully qualified CRD name (e.g. "pluginconfigs.demo.example.com").
+//
+// Panics if mgr is nil.
 func For[T client.Object](mgr ctrl.Manager, crdName string) *WatcherBuilder[T] {
+	if mgr == nil {
+		panic("dynamicwatch: For called with nil manager")
+	}
+
 	return &WatcherBuilder[T]{
 		mgr:     mgr,
 		crdName: crdName,
@@ -137,10 +143,6 @@ func (b *WatcherBuilder[T]) EnqueueOnCRDChange(fn RequeueParentsFn) *WatcherBuil
 // Build creates the [Watcher]. Returns an error if required fields are
 // missing or if the GVK cannot be derived from the scheme.
 func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
-	if b.mgr == nil {
-		return nil, errors.New("dynamicwatch: manager is required")
-	}
-
 	if b.crdName == "" {
 		return nil, errors.New("dynamicwatch: crdName is required")
 	}
