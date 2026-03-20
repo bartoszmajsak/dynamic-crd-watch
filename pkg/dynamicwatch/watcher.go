@@ -46,10 +46,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// ErrCacheInvalidated is returned by [Watcher.Get] when the informer was
+// errCacheInvalidated is returned by [Watcher.get] when the informer was
 // removed between [Watcher.Ensure] and the read. The watcher resets its
 // internal state automatically - the caller should requeue.
-var ErrCacheInvalidated = errors.New("informer removed during operation")
+var errCacheInvalidated = errors.New("informer removed during operation")
 
 // RequeueParentsFn returns reconcile requests for all parent objects affected
 // by a CRD lifecycle change (appearance or removal).
@@ -224,34 +224,19 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 	return false
 }
 
-// Get reads an object of type T from the cache. If the informer was removed
-// between [Watcher.Ensure] and this call (the RemoveInformer/Get race), the
-// watcher resets its internal state and returns [ErrCacheInvalidated]. The
+// get reads an object of type T from the cache. If the informer was removed
+// between [Watcher.Ensure] and this call (the RemoveInformer/get race), the
+// watcher resets its internal state and returns [errCacheInvalidated]. The
 // caller should requeue.
 //
 // All other errors (including NotFound) are returned as-is.
-func (w *Watcher[T]) Get(ctx context.Context, key client.ObjectKey, obj T) error {
+func (w *Watcher[T]) get(ctx context.Context, key client.ObjectKey, obj T) error {
 	if err := w.objCache.Get(ctx, key, obj); err != nil {
 		var notCached *cache.ErrResourceNotCached
 		if errors.As(err, &notCached) {
-			w.mu.Lock()
-			w.watching = false
-			w.active = false
+			w.handleCacheInvalidated()
 
-			// Reset crdExists because ErrResourceNotCached only occurs after
-			// onCRDChange called RemoveInformer due to CRD removal. A subsequent
-			// CRD re-installation will trigger a new onCRDChange event that sets
-			// crdExists=true again.
-			w.crdExists = false
-			w.generation++
-
-			if w.cancelSyncWaiter != nil {
-				w.cancelSyncWaiter()
-				w.cancelSyncWaiter = nil
-			}
-			w.mu.Unlock()
-
-			return ErrCacheInvalidated
+			return errCacheInvalidated
 		}
 
 		return err
@@ -267,6 +252,21 @@ func (w *Watcher[T]) Available() bool {
 	defer w.mu.Unlock()
 
 	return w.active
+}
+
+// handleCacheInvalidated resets watcher state after discovering the informer
+// was removed. Called by get and list when they encounter ErrResourceNotCached.
+func (w *Watcher[T]) handleCacheInvalidated() {
+	w.mu.Lock()
+	w.watching = false
+	w.active = false
+	w.crdExists = false
+	w.generation++
+	if w.cancelSyncWaiter != nil {
+		w.cancelSyncWaiter()
+		w.cancelSyncWaiter = nil
+	}
+	w.mu.Unlock()
 }
 
 // onCRDChange handles CRD lifecycle events for the target CRD.
