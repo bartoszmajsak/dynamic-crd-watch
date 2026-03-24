@@ -39,11 +39,10 @@ func NewTestWatcher[T client.Object](
 	c cache.Cache,
 	ctx context.Context,
 ) *Watcher[T] {
-	return &Watcher[T]{
+	w := &Watcher[T]{
 		crdName:     crdName,
 		objCache:    c,
 		ctx:         ctx,
-		started:     true,
 		syncTimeout: defaultSyncTimeout,
 		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ T) []reconcile.Request { return nil },
@@ -51,6 +50,9 @@ func NewTestWatcher[T client.Object](
 		requeueAll: func(_ context.Context) []reconcile.Request { return nil },
 		newT:       newInstance[T],
 	}
+	w.started.Store(true)
+
+	return w
 }
 
 // NewUnstartedTestWatcher creates a Watcher without setting started=true.
@@ -76,7 +78,7 @@ func NewUnstartedTestWatcher[T client.Object](
 // without going through the real Start() method.
 func SetStarted[T client.Object](w *Watcher[T], ctx context.Context) {
 	w.ctx = ctx
-	w.started = true
+	w.started.Store(true)
 }
 
 // SetCRDExists sets the event-driven CRD existence flag.

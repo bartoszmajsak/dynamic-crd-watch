@@ -68,9 +68,8 @@ func TestTransformCRDForCache_NonCRDObject_PassesThrough(t *testing.T) {
 
 func TestStart_CalledTwice_ReturnsError(t *testing.T) {
 	// The guard fires before accessing crdCache, so a nil crdCache is fine.
-	w := &Watcher[client.Object]{
-		started: true,
-	}
+	w := &Watcher[client.Object]{}
+	w.started.Store(true)
 
 	err := w.Start(context.Background(), nil)
 	if err == nil {

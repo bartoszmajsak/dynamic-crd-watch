@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -137,7 +138,7 @@ type Watcher[T client.Object] struct {
 	ctx context.Context //nolint:containedctx // Intentional: goroutines spawned by Ensure need the lifecycle context.
 	// queue is the controller's work queue, set by Start.
 	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
-	started bool
+	started atomic.Bool
 	crdSrc  source.SyncingSource
 
 	mu               sync.Mutex
@@ -154,7 +155,7 @@ type Watcher[T client.Object] struct {
 //
 // This method satisfies [source.TypedSource] and must not be called directly.
 func (w *Watcher[T]) Start(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-	if w.started {
+	if w.started.Load() {
 		return errors.New("dynamicwatch: Start called twice")
 	}
 
@@ -170,7 +171,7 @@ func (w *Watcher[T]) Start(ctx context.Context, queue workqueue.TypedRateLimitin
 		return err
 	}
 
-	w.started = true
+	w.started.Store(true)
 
 	return nil
 }
@@ -204,7 +205,7 @@ func (w *Watcher[T]) WaitForSync(ctx context.Context) error {
 //
 // Panics if called before Start.
 func (w *Watcher[T]) Ensure(ctx context.Context) bool {
-	if !w.started {
+	if !w.started.Load() {
 		panic("dynamicwatch: Ensure called before Start")
 	}
 
@@ -342,8 +343,10 @@ func (w *Watcher[T]) Available() bool {
 // Status returns diagnostic information about the watcher's current state.
 // It reports why the watcher is available or unavailable without complicating
 // the TryGet/TryList API.
+//
+// This is a point-in-time snapshot - the state may change immediately after.
 func (w *Watcher[T]) Status() WatcherStatus {
-	if !w.started {
+	if !w.started.Load() {
 		return WatcherStatus{Reason: ReasonNotStarted}
 	}
 
