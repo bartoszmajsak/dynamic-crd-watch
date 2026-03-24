@@ -1006,3 +1006,80 @@ func TestWatcher_DefaultSyncTimeout_Is30Seconds(t *testing.T) {
 		t.Errorf("expected default sync timeout to be %v, got %v", expected, timeout)
 	}
 }
+
+func TestStatus_NotStarted(t *testing.T) {
+	w := dynamicwatch.NewUnstartedTestWatcher[*corev1.ConfigMap](testCRDName, &fakeCache{})
+
+	status := w.Status()
+
+	if status.Available {
+		t.Error("expected Available=false for NotStarted state")
+	}
+
+	if status.Reason != dynamicwatch.ReasonNotStarted {
+		t.Errorf("expected Reason=NotStarted, got %s", status.Reason)
+	}
+}
+
+func TestStatus_Ready(t *testing.T) {
+	w := newStartedWatcher(&fakeCache{})
+	dynamicwatch.SetActive(w, true)
+
+	status := w.Status()
+
+	if !status.Available {
+		t.Error("expected Available=true for Ready state")
+	}
+
+	if status.Reason != dynamicwatch.ReasonReady {
+		t.Errorf("expected Reason=Ready, got %s", status.Reason)
+	}
+}
+
+func TestStatus_CRDNotFound(t *testing.T) {
+	w := newStartedWatcher(&fakeCache{})
+	// crdExists defaults to false, watching defaults to false
+
+	status := w.Status()
+
+	if status.Available {
+		t.Error("expected Available=false for CRDNotFound state")
+	}
+
+	if status.Reason != dynamicwatch.ReasonCRDNotFound {
+		t.Errorf("expected Reason=CRDNotFound, got %s", status.Reason)
+	}
+}
+
+func TestStatus_Syncing(t *testing.T) {
+	w := newStartedWatcher(&fakeCache{})
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetWatching(w, true)
+	// active defaults to false
+
+	status := w.Status()
+
+	if status.Available {
+		t.Error("expected Available=false for Syncing state")
+	}
+
+	if status.Reason != dynamicwatch.ReasonSyncing {
+		t.Errorf("expected Reason=Syncing, got %s", status.Reason)
+	}
+}
+
+func TestStatus_Pending(t *testing.T) {
+	w := newStartedWatcher(&fakeCache{})
+	dynamicwatch.SetCRDExists(w, true)
+	// watching defaults to false, active defaults to false
+
+	status := w.Status()
+
+	if status.Available {
+		t.Error("expected Available=false for Pending state")
+	}
+
+	if status.Reason != dynamicwatch.ReasonPending {
+		t.Errorf("expected Reason=Pending, got %s", status.Reason)
+	}
+}

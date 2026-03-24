@@ -55,6 +55,23 @@ import (
 // internal state automatically - the caller should requeue.
 var errCacheInvalidated = errors.New("informer removed during operation")
 
+// WatcherReason describes why a watcher is in its current state.
+type WatcherReason string
+
+const (
+	ReasonReady       WatcherReason = "Ready"
+	ReasonNotStarted  WatcherReason = "NotStarted"
+	ReasonCRDNotFound WatcherReason = "CRDNotFound"
+	ReasonSyncing     WatcherReason = "Syncing"
+	ReasonPending     WatcherReason = "Pending"
+)
+
+// WatcherStatus reports the current state of a Watcher for diagnostics.
+type WatcherStatus struct {
+	Available bool
+	Reason    WatcherReason
+}
+
 // RequeueParentsFn returns reconcile requests for all parent objects affected
 // by a CRD lifecycle change (appearance or removal).
 type RequeueParentsFn func(ctx context.Context) []reconcile.Request
@@ -317,6 +334,29 @@ func (w *Watcher[T]) Available() bool {
 	defer w.mu.Unlock()
 
 	return w.active
+}
+
+// Status returns diagnostic information about the watcher's current state.
+// It reports why the watcher is available or unavailable without complicating
+// the TryGet/TryList API.
+func (w *Watcher[T]) Status() WatcherStatus {
+	if !w.started {
+		return WatcherStatus{Reason: ReasonNotStarted}
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.active {
+		return WatcherStatus{Available: true, Reason: ReasonReady}
+	}
+	if !w.crdExists {
+		return WatcherStatus{Reason: ReasonCRDNotFound}
+	}
+	if w.watching {
+		return WatcherStatus{Reason: ReasonSyncing}
+	}
+	return WatcherStatus{Reason: ReasonPending}
 }
 
 // handleCacheInvalidated resets watcher state after discovering the informer
