@@ -104,6 +104,13 @@ r.ownedWatch, err = dynamicwatch.For[*v1alpha1.OwnedResource](mgr, "ownedresourc
 
 The Watcher implements `source.SyncingSource`, so it plugs directly into the builder via `WatchesRawSource`. The controller framework calls `Start` and `WaitForSync` automatically - no manual wiring needed.
 
+The builder also supports a few optional knobs:
+
+- `WithSyncTimeout(d)` - how long to wait for the informer to sync before tearing down and retrying (default: 30s)
+- `WithEventRecorder(recorder)` - emit Kubernetes events on watch lifecycle transitions (activated, deactivated, sync failed)
+- `WithNamespaces(...)` - restrict the private object cache to specific namespaces (important for namespace-scoped RBAC)
+- `WithCRDCache(...)` - share a single CRD informer across multiple watchers
+
 ### Reconcile loop
 
 In your `Reconcile` method, use `TryGet` to check CRD availability and read the object in one call:
@@ -138,6 +145,28 @@ func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 - `(false, nil)` - CRD unavailable or informer removed mid-read
 
 There's also `TryList` with the same semantics for listing objects.
+
+### Observability
+
+The watcher exposes its state through three channels:
+
+**`Status()`** returns a `WatcherStatus` with `Available` and `Reason` fields. Useful for health checks or debug endpoints without parsing logs:
+
+```go
+status := r.optionalWatch.Status()
+// status.Reason is one of: Ready, CRDNotFound, Syncing, Pending, NotStarted
+```
+
+**Prometheus metrics** are registered automatically with controller-runtime's metrics registry:
+
+- `dynamicwatch_active{crd="..."}` - gauge, 1 when the watch is active, 0 otherwise
+- `dynamicwatch_state_transitions_total{crd="...", transition="..."}` - counter tracking `activated`, `deactivated`, `invalidated`, and `sync_failed` transitions
+
+**Kubernetes events** are opt-in via `WithEventRecorder`. When enabled, the watcher emits events on the CRD object:
+
+- Normal `WatchActivated` - informer synced, watch ready
+- Warning `WatchDeactivated` - CRD removed, watch torn down
+- Warning `WatchSyncFailed` - informer sync failed, will retry
 
 ### Prerequisites
 

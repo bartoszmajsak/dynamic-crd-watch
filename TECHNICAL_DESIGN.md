@@ -27,7 +27,7 @@ This is for:
 
 ### Builder
 
-`For[T](mgr, crdName)` starts a fluent builder for one optional CRD.
+`For[T](mgr, crdName)` starts a fluent builder for one optional CRD. The CRD name must be in `<plural>.<group>` format - `Build()` validates this and fails fast on obviously wrong names (bare plurals, empty strings, missing group).
 
 `Build()` requires:
 
@@ -39,6 +39,8 @@ Important builder options:
 - `WithCRDCache(...)` shares one CRD informer across multiple watchers
 - `WithPredicates(...)` filters events for the watched object type
 - `WithNamespaces(...)` scopes the private object cache to specific namespaces
+- `WithSyncTimeout(d)` overrides the 30s default for informer sync (see "Sync Promotion" rationale)
+- `WithEventRecorder(recorder)` enables Kubernetes event emission on lifecycle transitions
 
 ### Watcher
 
@@ -51,7 +53,8 @@ The consumer-facing methods are:
 | `Ensure(ctx) bool` | Make sure the dynamic watch is registered and report whether the object cache is ready for reads. |
 | `TryGet(ctx, key, obj)` | Preferred read path. Returns `(false, nil)` when the optional type is not usable right now. |
 | `TryList(ctx, list, opts...)` | Same semantics as `TryGet`, but for lists. |
-| `Available()` | Point-in-time diagnostic snapshot only. |
+| `Status()` | Returns a `WatcherStatus` with `Available` bool and `Reason` string. Designed for health checks and debug endpoints. |
+| `Available()` | Point-in-time diagnostic snapshot only. Equivalent to `Status().Available`. |
 
 `WaitForSync()` only waits for the CRD informer, not the optional object's informer. That means controller startup can complete while a dynamic object watch is still absent or still syncing. Consumers must treat `(false, nil)` from `TryGet` and `TryList` as a normal state.
 
@@ -80,7 +83,7 @@ The watcher keeps a small mutex-protected state machine:
 Two details matter:
 
 - `watching` and `active` are intentionally different states. A watch can be registered but not yet ready.
-- `started`, `ctx`, and `queue` are populated by `Start()` and treated as controller lifecycle state, not per-reconcile state.
+- `started` is an `atomic.Bool` (not mutex-guarded) because `Status()` reads it concurrently for health checks. `ctx` and `queue` are populated by `Start()` and treated as controller lifecycle state, not per-reconcile state.
 
 ## Design Rationale
 
@@ -173,9 +176,9 @@ The watcher only needs metadata and status, especially the CRD name, `DeletionTi
 ### For consumers
 
 - The watched type must exist in the scheme at build time. This pattern does not support arbitrary unstructured CRDs discovered only at runtime.
-- A wrong CRD name is not caught by `Build()`. The watcher will simply remain unavailable forever at runtime.
+- `Build()` validates CRD name format (`<plural>.<group>`), but a well-formed typo (e.g. `pluginconfig.demo.example.com` instead of `pluginconfigs.demo.example.com`) passes validation. The watcher will simply remain unavailable forever at runtime.
 - Controller `WaitForSync()` does not imply the optional object cache is ready. Early reconciles can legitimately see `(false, nil)` until the dynamic informer syncs.
-- `TryGet()` and `TryList()` intentionally collapse multiple causes into the same `(false, nil)` result: CRD absent, CRD deleting, informer syncing, or informer invalidated mid-read. That keeps consumers simple, but it reduces diagnostic precision.
+- `TryGet()` and `TryList()` intentionally collapse multiple causes into the same `(false, nil)` result: CRD absent, CRD deleting, informer syncing, or informer invalidated mid-read. That keeps consumers simple, but it reduces diagnostic precision. For deeper insight, `Status()` returns a `Reason` that distinguishes between these states.
 - Correctness depends on the caller's `EnqueueOnCRDChange(...)` and mapping functions being complete. If those functions miss a parent, the library cannot invent the missing reconcile request.
 - `EnqueueRequestsFromMapFunc` cannot return errors. In the example controller, a failed `List()` during mapping or CRD-change requeue is logged and the reconcile requests are dropped until another event arrives.
 - A shared `CRDCache` watches all CRDs cluster-wide. That lowers connection fanout, but it increases baseline watch traffic and requires cluster-scoped `list/watch` permission on CRDs.
@@ -185,7 +188,7 @@ The watcher only needs metadata and status, especially the CRD name, `DeletionTi
 ### Implementation constraints
 
 - Every watcher adds a private cache. That is the cost of informer isolation.
-- Informer sync timeout is fixed at 30 seconds. Repeated sync failure can cause repeated teardown and requeue cycles.
+- Informer sync timeout defaults to 30 seconds, configurable via `WithSyncTimeout(d)`. Repeated sync failure can cause repeated teardown and requeue cycles.
 - Temporary status flapping is expected during rapid install/remove/reinstall cycles. The library chooses eventual correctness over hiding every transient state.
 
 ## Version Constraints
@@ -212,6 +215,7 @@ Important testing choices:
 
 - `pkg/dynamicwatch/watcher.go`: watcher lifecycle, CRD handling, sync waiter, cache invalidation.
 - `pkg/dynamicwatch/builder.go`: builder contract and cache construction.
+- `pkg/dynamicwatch/metrics.go`: Prometheus metric definitions (`dynamicwatch_active`, `dynamicwatch_state_transitions_total`).
 - `pkg/dynamicwatch/watcher_test.go`: unit tests for lifecycle and race handling.
 - `internal/controller/widget_controller.go`: example consumer with two independent optional CRDs.
 - `internal/controller/widget_controller_int_test.go`: envtest integration tests for the example controller.
