@@ -104,13 +104,14 @@ var _ source.SyncingSource = (*Watcher[client.Object])(nil)
 // It implements [source.SyncingSource] so it can be passed directly to
 // [builder.Builder.WatchesRawSource].
 type Watcher[T client.Object] struct {
-	crdName    string
-	objCache   cache.Cache
-	crdCache   cache.Cache
-	objHandler handler.TypedEventHandler[T, reconcile.Request]
-	predicates []predicate.TypedPredicate[T]
-	requeueAll RequeueParentsFn
-	newT       func() T
+	crdName     string
+	objCache    cache.Cache
+	crdCache    cache.Cache
+	objHandler  handler.TypedEventHandler[T, reconcile.Request]
+	predicates  []predicate.TypedPredicate[T]
+	requeueAll  RequeueParentsFn
+	newT        func() T
+	syncTimeout time.Duration
 
 	// ctx is the controller lifecycle context, set by Start.
 	ctx context.Context //nolint:containedctx // Intentional: goroutines spawned by Ensure need the lifecycle context.
@@ -215,10 +216,10 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 			w.cancelSyncWaiter()
 		}
 
-		syncCtx, syncCancel := context.WithTimeout(w.ctx, informerSyncTimeout) //nolint:contextcheck // Timeout derived from lifecycle context, not per-reconcile ctx.
+		syncCtx, syncCancel := context.WithTimeout(w.ctx, w.syncTimeout)
 		w.cancelSyncWaiter = syncCancel
 
-		go w.waitForSyncAndRequeue(syncCtx, syncCancel, w.generation, src)
+		go w.waitForSyncAndRequeue(syncCtx, syncCancel, w.generation, src) //nolint:contextcheck // Timeout derived from lifecycle context, not per-reconcile ctx.
 
 		log.Info("Started dynamic watch, waiting for informer sync", "crd", w.crdName)
 	}
@@ -404,11 +405,12 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 	return w.requeueAll(ctx)
 }
 
-// informerSyncTimeout is a safety net for rare cases where the informer
-// gets stuck syncing (e.g. misbehaving API server). In normal operation
-// sync completes in milliseconds - this just prevents the goroutine from
-// blocking for the entire manager lifetime with no signal.
-const informerSyncTimeout = 30 * time.Second
+// defaultSyncTimeout is the default timeout for waiting for the informer
+// cache to sync after registering a new watch. This is a safety net for rare
+// cases where the informer gets stuck syncing (e.g. misbehaving API server).
+// In normal operation sync completes in milliseconds - this just prevents the
+// goroutine from blocking for the entire manager lifetime with no signal.
+const defaultSyncTimeout = 30 * time.Second
 
 // waitForSyncAndRequeue blocks until the object cache has synced, then
 // promotes the watcher to active and enqueues all affected parent objects.
@@ -418,6 +420,7 @@ const informerSyncTimeout = 30 * time.Second
 // The generation parameter guards against stale promotions: if the CRD is
 // removed while this method is blocking, [Watcher.onCRDChange] increments
 // the generation and the stale goroutine bails without promoting.
+//
 //nolint:contextcheck // This goroutine intentionally uses w.ctx (lifecycle) for cleanup/requeue, not syncCtx (timeout-scoped).
 func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel context.CancelFunc, gen uint64, src source.SyncingSource) {
 	defer syncCancel() // stop the timeout timer

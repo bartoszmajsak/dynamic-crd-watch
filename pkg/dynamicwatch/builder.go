@@ -3,6 +3,7 @@ package dynamicwatch
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -26,6 +27,7 @@ type WatcherBuilder[T client.Object] struct {
 	predicates        []predicate.TypedPredicate[T]
 	requeueAll        RequeueParentsFn
 	defaultNamespaces map[string]cache.Config
+	syncTimeout       time.Duration
 }
 
 // For starts building a [Watcher] for an optional CRD.
@@ -136,6 +138,22 @@ func (b *WatcherBuilder[T]) WithNamespaces(namespaces ...string) *WatcherBuilder
 // parent objects affected when the CRD itself is installed or removed.
 func (b *WatcherBuilder[T]) EnqueueOnCRDChange(fn RequeueParentsFn) *WatcherBuilder[T] {
 	b.requeueAll = fn
+
+	return b
+}
+
+// WithSyncTimeout sets the timeout for waiting for the informer cache to sync
+// after registering a new watch. When the informer takes longer than this
+// timeout to sync, the watch is torn down and the watcher returns to the
+// unsynced state - the next Ensure() call will retry.
+//
+// The default is 30 seconds. Panics if d is <= 0.
+func (b *WatcherBuilder[T]) WithSyncTimeout(d time.Duration) *WatcherBuilder[T] {
+	if d <= 0 {
+		panic("dynamicwatch: WithSyncTimeout called with non-positive duration")
+	}
+
+	b.syncTimeout = d
 
 	return b
 }
@@ -263,14 +281,20 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 			b.mgr.GetScheme(), b.mgr.GetRESTMapper(), b.ownerType, b.ownerOpts...)
 	}
 
+	syncTimeout := b.syncTimeout
+	if syncTimeout == 0 {
+		syncTimeout = defaultSyncTimeout
+	}
+
 	w := &Watcher[T]{
-		crdName:    b.crdName,
-		objCache:   objCache,
-		crdCache:   crdCache,
-		objHandler: objHandler,
-		predicates: b.predicates,
-		requeueAll: b.requeueAll,
-		newT:       newT,
+		crdName:     b.crdName,
+		objCache:    objCache,
+		crdCache:    crdCache,
+		objHandler:  objHandler,
+		predicates:  b.predicates,
+		requeueAll:  b.requeueAll,
+		newT:        newT,
+		syncTimeout: syncTimeout,
 	}
 
 	return w, nil

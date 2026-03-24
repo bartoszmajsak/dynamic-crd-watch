@@ -13,6 +13,7 @@ package dynamicwatch
 
 import (
 	"context"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/util/workqueue"
@@ -32,10 +33,11 @@ func NewTestWatcher[T client.Object](
 	ctx context.Context,
 ) *Watcher[T] {
 	return &Watcher[T]{
-		crdName:  crdName,
-		objCache: c,
-		ctx:      ctx,
-		started:  true,
+		crdName:     crdName,
+		objCache:    c,
+		ctx:         ctx,
+		started:     true,
+		syncTimeout: defaultSyncTimeout,
 		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ T) []reconcile.Request { return nil },
 		),
@@ -51,8 +53,9 @@ func NewUnstartedTestWatcher[T client.Object](
 	c cache.Cache,
 ) *Watcher[T] {
 	return &Watcher[T]{
-		crdName:  crdName,
-		objCache: c,
+		crdName:     crdName,
+		objCache:    c,
+		syncTimeout: defaultSyncTimeout,
 		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ T) []reconcile.Request { return nil },
 		),
@@ -138,4 +141,9 @@ func CallWaitForSyncAndRequeue[T client.Object](
 	gen uint64, src source.SyncingSource,
 ) {
 	w.waitForSyncAndRequeue(syncCtx, syncCancel, gen, src)
+}
+
+// SyncTimeout returns the configured sync timeout for the watcher.
+func SyncTimeout[T client.Object](w *Watcher[T]) time.Duration {
+	return w.syncTimeout
 }

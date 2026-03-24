@@ -971,3 +971,38 @@ func TestWaitForSyncAndRequeue_Timeout_ResetsWatchingAndRemovesInformer(t *testi
 		t.Errorf("expected 1 RemoveInformer call after timeout, got %d", fc.RemoveCallCount())
 	}
 }
+
+func TestBuilder_WithSyncTimeout_PanicsOnZero(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when WithSyncTimeout called with zero duration")
+		}
+	}()
+
+	// The builder method should panic before we even get to Build().
+	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithSyncTimeout(0)
+}
+
+func TestBuilder_WithSyncTimeout_PanicsOnNegative(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when WithSyncTimeout called with negative duration")
+		}
+	}()
+
+	// The builder method should panic before we even get to Build().
+	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithSyncTimeout(-5 * time.Second)
+}
+
+func TestWatcher_DefaultSyncTimeout_Is30Seconds(t *testing.T) {
+	w := newTestWatcher(&fakeCache{})
+
+	timeout := dynamicwatch.SyncTimeout(w)
+	expected := 30 * time.Second
+
+	if timeout != expected {
+		t.Errorf("expected default sync timeout to be %v, got %v", expected, timeout)
+	}
+}
