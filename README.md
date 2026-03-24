@@ -4,6 +4,8 @@ Controllers that depend on optional CRDs - think KEDA, Prometheus Operator, or a
 
 This project shows how to handle both cases cleanly with controller-runtime, no restarts needed. The core logic lives in a reusable [`dynamicwatch`](pkg/dynamicwatch/) package that you can drop into your own controller.
 
+If you want the system overview and implementation rationale, see [ARCHITECTURE.md](ARCHITECTURE.md) and [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md).
+
 ## How it works
 
 The setup is intentionally simple - three CRDs:
@@ -163,7 +165,7 @@ crdRemoved := !crd.DeletionTimestamp.IsZero() || !isCRDEstablished(crd)
 
 ### The `RemoveInformer` / read race (handled for you)
 
-If `RemoveInformer` fires between `Ensure()` returning ready and the cache read, the cache returns `ErrResourceNotCached`. The Watcher catches this internally - `TryGet`/`TryList` return `(false, nil)`, indistinguishable from "CRD not installed". The watcher resets its state and requeues affected parents automatically. No special handling needed in your reconciler.
+If `RemoveInformer` fires between `Ensure()` returning ready and the cache read, the cache returns `ErrResourceNotCached`. The Watcher catches this internally - `TryGet`/`TryList` return `(false, nil)`, indistinguishable from "CRD not installed". The watcher resets its state, and recovery then depends on the next CRD event or another enqueue path. No special handling is needed in your reconciler.
 
 ## Quick start
 
