@@ -113,7 +113,7 @@ type Watcher[T client.Object] struct {
 	newT       func() T
 
 	// ctx is the controller lifecycle context, set by Start.
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // Intentional: goroutines spawned by Ensure need the lifecycle context.
 	// queue is the controller's work queue, set by Start.
 	queue   workqueue.TypedRateLimitingInterface[reconcile.Request]
 	started bool
@@ -203,7 +203,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 	if !w.watching {
 		src := source.Kind(w.objCache, w.newT(), w.objHandler, w.predicates...)
 
-		if err := src.Start(w.ctx, w.queue); err != nil {
+		if err := src.Start(w.ctx, w.queue); err != nil { //nolint:contextcheck // w.ctx is the lifecycle context from Start, not the per-reconcile ctx.
 			log.Error(err, "Failed to start dynamic watch", "crd", w.crdName)
 
 			return false
@@ -215,7 +215,7 @@ func (w *Watcher[T]) Ensure(ctx context.Context) bool {
 			w.cancelSyncWaiter()
 		}
 
-		syncCtx, syncCancel := context.WithTimeout(w.ctx, informerSyncTimeout)
+		syncCtx, syncCancel := context.WithTimeout(w.ctx, informerSyncTimeout) //nolint:contextcheck // Timeout derived from lifecycle context, not per-reconcile ctx.
 		w.cancelSyncWaiter = syncCancel
 
 		go w.waitForSyncAndRequeue(syncCtx, syncCancel, w.generation, src)
@@ -418,6 +418,7 @@ const informerSyncTimeout = 30 * time.Second
 // The generation parameter guards against stale promotions: if the CRD is
 // removed while this method is blocking, [Watcher.onCRDChange] increments
 // the generation and the stale goroutine bails without promoting.
+//nolint:contextcheck // This goroutine intentionally uses w.ctx (lifecycle) for cleanup/requeue, not syncCtx (timeout-scoped).
 func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel context.CancelFunc, gen uint64, src source.SyncingSource) {
 	defer syncCancel() // stop the timeout timer
 

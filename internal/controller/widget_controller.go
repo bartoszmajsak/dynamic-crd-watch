@@ -71,7 +71,7 @@ func (r *WidgetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return mergeResults(pluginResult, themeResult), nil
 }
 
-//nolint:dupl // Structural similarity with reconcileTheme is intentional; each handles a different type.
+//nolint:dupl,unparam // Structural similarity with reconcileTheme is intentional; each handles a different type.
 func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1alpha1.Widget) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -108,7 +108,7 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 	return ctrl.Result{}, nil
 }
 
-//nolint:dupl // Structural similarity with reconcilePlugin is intentional; each handles a different type.
+//nolint:dupl,unparam // Structural similarity with reconcilePlugin is intentional; each handles a different type.
 func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alpha1.Widget) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 

@@ -13,12 +13,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	toolscache "k8s.io/client-go/tools/cache"
 
 	"github.com/bartoszmajsak/dynamic-watch-poc/pkg/dynamicwatch"
 )
@@ -121,6 +121,7 @@ func (f *fakeRegistration) HasSynced() bool {
 // real waitForSyncAndRequeue code path.
 type fakeSyncingSource struct {
 	source.SyncingSource
+
 	syncErr error
 }
 
@@ -302,7 +303,7 @@ func TestTryGet_ErrResourceNotCached_IncrementsGeneration(t *testing.T) {
 
 	genBefore := dynamicwatch.Generation(w)
 
-	w.TryGet(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
+	_, _ = w.TryGet(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
 
 	genAfter := dynamicwatch.Generation(w)
 	if genAfter != genBefore+1 {
@@ -798,7 +799,7 @@ func TestConcurrent_OnCRDChange_And_TryGet(t *testing.T) {
 			dynamicwatch.SimulateCRDChange(w, t.Context(), removedCRD)
 		})
 		wg.Go(func() {
-			w.TryGet(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
+			_, _ = w.TryGet(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
 		})
 	}
 	wg.Wait()
