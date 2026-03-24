@@ -981,10 +981,13 @@ func TestBuilder_WithSyncTimeout_PanicsOnZero(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected panic when WithSyncTimeout called with zero duration")
 		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "WithSyncTimeout") {
+			t.Fatalf("panic should mention WithSyncTimeout, got: %v", r)
+		}
 	}()
 
-	// The builder method should panic before we even get to Build().
-	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithSyncTimeout(0)
+	b := &dynamicwatch.WatcherBuilder[*corev1.ConfigMap]{}
+	b.WithSyncTimeout(0)
 }
 
 func TestBuilder_WithSyncTimeout_PanicsOnNegative(t *testing.T) {
@@ -993,10 +996,13 @@ func TestBuilder_WithSyncTimeout_PanicsOnNegative(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected panic when WithSyncTimeout called with negative duration")
 		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "WithSyncTimeout") {
+			t.Fatalf("panic should mention WithSyncTimeout, got: %v", r)
+		}
 	}()
 
-	// The builder method should panic before we even get to Build().
-	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithSyncTimeout(-5 * time.Second)
+	b := &dynamicwatch.WatcherBuilder[*corev1.ConfigMap]{}
+	b.WithSyncTimeout(-5 * time.Second)
 }
 
 func TestWatcher_DefaultSyncTimeout_Is30Seconds(t *testing.T) {
@@ -1379,7 +1385,11 @@ func TestBuilder_WithEventRecorder_PanicsOnNil(t *testing.T) {
 		if r == nil {
 			t.Fatal("expected panic when WithEventRecorder called with nil recorder")
 		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "WithEventRecorder") {
+			t.Fatalf("panic should mention WithEventRecorder, got: %v", r)
+		}
 	}()
 
-	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithEventRecorder(nil)
+	b := &dynamicwatch.WatcherBuilder[*corev1.ConfigMap]{}
+	b.WithEventRecorder(nil)
 }

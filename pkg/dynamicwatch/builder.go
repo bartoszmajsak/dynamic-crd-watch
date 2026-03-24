@@ -1,8 +1,8 @@
 package dynamicwatch
 
 import (
-	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -175,32 +175,9 @@ func (b *WatcherBuilder[T]) WithEventRecorder(recorder record.EventRecorder) *Wa
 // validateCRDName checks if the CRD name is in the valid format <plural>.<group>.
 // A valid CRD name must contain at least one dot with non-empty parts on both sides.
 func validateCRDName(name string) error {
-	if name == "" {
-		return errors.New("dynamicwatch: crdName is required")
-	}
-
-	// Find the first dot to split plural and group.
-	dotIdx := -1
-	for i, c := range name {
-		if c == '.' {
-			dotIdx = i
-			break
-		}
-	}
-
-	// No dot found - bare plural without group.
-	if dotIdx == -1 {
-		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
-	}
-
-	// Leading dot - empty plural.
-	if dotIdx == 0 {
-		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
-	}
-
-	// Trailing dot - empty group.
-	if dotIdx == len(name)-1 {
-		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
+	idx := strings.IndexByte(name, '.')
+	if idx < 1 || idx >= len(name)-1 {
+		return fmt.Errorf("dynamicwatch: crdName %q must be in <plural>.<group> format (e.g. 'widgets.example.com')", name)
 	}
 
 	return nil

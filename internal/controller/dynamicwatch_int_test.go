@@ -166,7 +166,7 @@ var _ = Describe("dynamicwatch.Build", func() {
 			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
-		Expect(err).To(MatchError(ContainSubstring("crdName is required")))
+		Expect(err).To(MatchError(ContainSubstring("<plural>.<group> format")))
 	})
 
 	It("rejects invalid CRD name - bare plural without group", func() {
@@ -178,8 +178,7 @@ var _ = Describe("dynamicwatch.Build", func() {
 			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
-		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
-		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+		Expect(err).To(MatchError(ContainSubstring("<plural>.<group> format")))
 	})
 
 	It("rejects invalid CRD name - trailing dot", func() {
@@ -191,8 +190,7 @@ var _ = Describe("dynamicwatch.Build", func() {
 			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
-		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
-		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+		Expect(err).To(MatchError(ContainSubstring("<plural>.<group> format")))
 	})
 
 	It("rejects invalid CRD name - leading dot", func() {
@@ -204,8 +202,7 @@ var _ = Describe("dynamicwatch.Build", func() {
 			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
 			EnqueueOnCRDChange(noopRequeueAll).
 			Build()
-		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
-		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+		Expect(err).To(MatchError(ContainSubstring("<plural>.<group> format")))
 	})
 })
 

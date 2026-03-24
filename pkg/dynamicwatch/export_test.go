@@ -84,6 +84,9 @@ func SetStarted[T client.Object](w *Watcher[T], ctx context.Context) {
 // SetCRDExists sets the event-driven CRD existence flag.
 // This lets tests control what Ensure() sees without a running CRD cache.
 func SetCRDExists[T client.Object](w *Watcher[T], exists bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.crdExists = exists
 }
 
@@ -99,6 +102,9 @@ func SetRequeueAll[T client.Object](w *Watcher[T], fn RequeueParentsFn) {
 // Ensure, or onCRDChange behavior. Setting active=true also sets the
 // watching flag, since active implies watching.
 func SetActive[T client.Object](w *Watcher[T], active bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.active = active
 	if active {
 		w.watching = true
@@ -108,17 +114,26 @@ func SetActive[T client.Object](w *Watcher[T], active bool) {
 // SetWatching forces the watching flag. Use this to simulate the state where
 // a watch source has been registered but the informer hasn't synced yet.
 func SetWatching[T client.Object](w *Watcher[T], watching bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.watching = watching
 }
 
 // SetGeneration sets the generation counter. Use this to test that stale
 // sync waiters don't promote the watcher after a teardown.
 func SetGeneration[T client.Object](w *Watcher[T], gen uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.generation = gen
 }
 
 // Generation returns the current generation counter value.
 func Generation[T client.Object](w *Watcher[T]) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	return w.generation
 }
 
