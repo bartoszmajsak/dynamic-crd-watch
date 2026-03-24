@@ -37,8 +37,10 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -129,6 +131,7 @@ type Watcher[T client.Object] struct {
 	requeueAll  RequeueParentsFn
 	newT        func() T
 	syncTimeout time.Duration
+	recorder    record.EventRecorder
 
 	// ctx is the controller lifecycle context, set by Start.
 	ctx context.Context //nolint:containedctx // Intentional: goroutines spawned by Ensure need the lifecycle context.
@@ -376,6 +379,19 @@ func (w *Watcher[T]) handleCacheInvalidated() {
 	w.mu.Unlock()
 }
 
+// recordEvent emits a Kubernetes event on the CRD object if a recorder
+// is configured. If no recorder was set via [WatcherBuilder.WithEventRecorder],
+// this is a no-op.
+func (w *Watcher[T]) recordEvent(eventType, reason, messageFmt string, args ...any) {
+	if w.recorder == nil {
+		return
+	}
+
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	crd.Name = w.crdName
+	w.recorder.Eventf(crd, eventType, reason, messageFmt, args...)
+}
+
 // onCRDChange handles CRD lifecycle events for the target CRD.
 //
 // When the CRD is being removed (DeletionTimestamp set or Established
@@ -424,6 +440,9 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 			}
 
 			log.Info("Removed watch after CRD deletion", "crd", w.crdName)
+
+			w.recordEvent(corev1.EventTypeWarning, "WatchDeactivated",
+				"Dynamic watch for %s removed after CRD deletion", w.crdName)
 		}
 
 		if wasReady {
@@ -496,6 +515,9 @@ func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel c
 			log.Error(err, "Failed to remove informer after sync failure", "crd", w.crdName)
 		}
 
+		w.recordEvent(corev1.EventTypeWarning, "WatchSyncFailed",
+			"Informer sync failed for %s: %v", w.crdName, syncErr)
+
 		for _, req := range w.requeueAll(w.ctx) {
 			w.queue.Add(req)
 		}
@@ -517,6 +539,9 @@ func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel c
 	w.mu.Unlock()
 
 	log.Info("Dynamic watch ready", "crd", w.crdName)
+
+	w.recordEvent(corev1.EventTypeNormal, "WatchActivated",
+		"Dynamic watch for %s is now active", w.crdName)
 
 	for _, req := range w.requeueAll(w.ctx) {
 		w.queue.Add(req)

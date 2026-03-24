@@ -16,6 +16,7 @@ import (
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -152,4 +153,9 @@ func CallWaitForSyncAndRequeue[T client.Object](
 // SyncTimeout returns the configured sync timeout for the watcher.
 func SyncTimeout[T client.Object](w *Watcher[T]) time.Duration {
 	return w.syncTimeout
+}
+
+// SetRecorder sets the event recorder on the watcher for testing.
+func SetRecorder[T client.Object](w *Watcher[T], recorder record.EventRecorder) {
+	w.recorder = recorder
 }

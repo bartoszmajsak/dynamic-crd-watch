@@ -3,6 +3,7 @@ package dynamicwatch_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	toolscache "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1261,4 +1263,123 @@ func TestMetrics_SyncFailed_StaleGeneration_NoCounter(t *testing.T) {
 		t.Errorf("expected sync_failed counter NOT to increment for stale generation, got delta %v",
 			counterAfter-counterBefore)
 	}
+}
+
+// --- Event recorder tests ---
+
+func TestEvent_Activation(t *testing.T) {
+	fc := &fakeCache{}
+	recorder := record.NewFakeRecorder(10)
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	dynamicwatch.SetRecorder(w, recorder)
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	src := &fakeSyncingSource{syncErr: nil}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 5*time.Second)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, dynamicwatch.Generation(w), src)
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "WatchActivated") {
+			t.Errorf("expected WatchActivated event, got: %s", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected event but none received")
+	}
+}
+
+func TestEvent_Deactivation(t *testing.T) {
+	fc := &fakeCache{}
+	recorder := record.NewFakeRecorder(10)
+	w := newStartedWatcher(fc)
+	dynamicwatch.SetRecorder(w, recorder)
+	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
+		return []reconcile.Request{{}}
+	})
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "WatchDeactivated") {
+			t.Errorf("expected WatchDeactivated event, got: %s", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected event but none received")
+	}
+}
+
+func TestEvent_SyncFailure(t *testing.T) {
+	fc := &fakeCache{}
+	recorder := record.NewFakeRecorder(10)
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	dynamicwatch.SetRecorder(w, recorder)
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	src := &fakeSyncingSource{syncErr: context.DeadlineExceeded}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, dynamicwatch.Generation(w), src)
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "WatchSyncFailed") {
+			t.Errorf("expected WatchSyncFailed event, got: %s", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected event but none received")
+	}
+}
+
+func TestEvent_NilRecorder_NoPanic(t *testing.T) {
+	fc := &fakeCache{}
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	// No recorder set - default is nil.
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	// Should not panic with nil recorder.
+	src := &fakeSyncingSource{syncErr: nil}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 5*time.Second)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, dynamicwatch.Generation(w), src)
+
+	if !w.Available() {
+		t.Error("expected available after successful sync even without recorder")
+	}
+}
+
+func TestBuilder_WithEventRecorder_PanicsOnNil(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when WithEventRecorder called with nil recorder")
+		}
+	}()
+
+	_ = dynamicwatch.For[*corev1.ConfigMap](nil, testCRDName).WithEventRecorder(nil)
 }

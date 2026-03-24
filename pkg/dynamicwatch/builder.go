@@ -7,6 +7,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +29,7 @@ type WatcherBuilder[T client.Object] struct {
 	requeueAll        RequeueParentsFn
 	defaultNamespaces map[string]cache.Config
 	syncTimeout       time.Duration
+	recorder          record.EventRecorder
 }
 
 // For starts building a [Watcher] for an optional CRD.
@@ -154,6 +156,18 @@ func (b *WatcherBuilder[T]) WithSyncTimeout(d time.Duration) *WatcherBuilder[T] 
 	}
 
 	b.syncTimeout = d
+
+	return b
+}
+
+// WithEventRecorder sets an event recorder for emitting Kubernetes events
+// on watch lifecycle transitions. If not set, no events are emitted.
+func (b *WatcherBuilder[T]) WithEventRecorder(recorder record.EventRecorder) *WatcherBuilder[T] {
+	if recorder == nil {
+		panic("dynamicwatch: WithEventRecorder called with nil recorder")
+	}
+
+	b.recorder = recorder
 
 	return b
 }
@@ -295,6 +309,7 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		requeueAll:  b.requeueAll,
 		newT:        newT,
 		syncTimeout: syncTimeout,
+		recorder:    b.recorder,
 	}
 
 	return w, nil
