@@ -371,6 +371,8 @@ func (w *Watcher[T]) handleCacheInvalidated() {
 		w.cancelSyncWaiter()
 		w.cancelSyncWaiter = nil
 	}
+	watcherActive.WithLabelValues(w.crdName).Set(0)
+	watcherTransitions.WithLabelValues(w.crdName, "invalidated").Inc()
 	w.mu.Unlock()
 }
 
@@ -424,6 +426,11 @@ func (w *Watcher[T]) onCRDChange(ctx context.Context, crd *apiextensionsv1.Custo
 			log.Info("Removed watch after CRD deletion", "crd", w.crdName)
 		}
 
+		if wasReady {
+			watcherActive.WithLabelValues(w.crdName).Set(0)
+			watcherTransitions.WithLabelValues(w.crdName, "deactivated").Inc()
+		}
+
 		// Only requeue if the watch was active - if it was never registered,
 		// there are no cached objects to invalidate and no state to re-evaluate.
 		if !wasReady {
@@ -475,6 +482,7 @@ func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel c
 		if !stale {
 			w.watching = false
 			w.cancelSyncWaiter = nil // goroutine is done
+			watcherTransitions.WithLabelValues(w.crdName, "sync_failed").Inc()
 			log.Info("Informer sync failed, will retry on next Ensure()", "crd", w.crdName, "error", syncErr)
 		}
 		w.mu.Unlock()
@@ -504,6 +512,8 @@ func (w *Watcher[T]) waitForSyncAndRequeue(syncCtx context.Context, syncCancel c
 
 	w.active = true
 	w.cancelSyncWaiter = nil // goroutine is done
+	watcherActive.WithLabelValues(w.crdName).Set(1)
+	watcherTransitions.WithLabelValues(w.crdName, "activated").Inc()
 	w.mu.Unlock()
 
 	log.Info("Dynamic watch ready", "crd", w.crdName)

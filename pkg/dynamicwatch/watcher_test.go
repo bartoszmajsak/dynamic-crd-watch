@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1081,5 +1082,183 @@ func TestStatus_Pending(t *testing.T) {
 
 	if status.Reason != dynamicwatch.ReasonPending {
 		t.Errorf("expected Reason=Pending, got %s", status.Reason)
+	}
+}
+
+// --- Metrics tests ---
+
+func TestMetrics_Activated_GaugeAndCounter(t *testing.T) {
+	fc := &fakeCache{}
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	gaugeBefore := testutil.ToFloat64(dynamicwatch.WatcherActive.WithLabelValues(testCRDName))
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "activated"))
+
+	src := &fakeSyncingSource{syncErr: nil}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 5*time.Second)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, dynamicwatch.Generation(w), src)
+
+	gaugeAfter := testutil.ToFloat64(dynamicwatch.WatcherActive.WithLabelValues(testCRDName))
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "activated"))
+
+	if gaugeAfter != 1 {
+		t.Errorf("expected gauge=1 after activation, got %v", gaugeAfter)
+	}
+
+	if counterAfter != counterBefore+1 {
+		t.Errorf("expected activated counter to increment by 1, got delta %v (before=%v, after=%v)",
+			counterAfter-counterBefore, counterBefore, counterAfter)
+	}
+
+	_ = gaugeBefore // gauge value before is not necessarily 0 due to other tests
+}
+
+func TestMetrics_Deactivated_GaugeAndCounter(t *testing.T) {
+	fc := &fakeCache{}
+	w := newStartedWatcher(fc)
+	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request {
+		return []reconcile.Request{{}}
+	})
+
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "deactivated"))
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	gaugeAfter := testutil.ToFloat64(dynamicwatch.WatcherActive.WithLabelValues(testCRDName))
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "deactivated"))
+
+	if gaugeAfter != 0 {
+		t.Errorf("expected gauge=0 after deactivation, got %v", gaugeAfter)
+	}
+
+	if counterAfter != counterBefore+1 {
+		t.Errorf("expected deactivated counter to increment by 1, got delta %v (before=%v, after=%v)",
+			counterAfter-counterBefore, counterBefore, counterAfter)
+	}
+}
+
+func TestMetrics_Deactivated_NotRecordedWhenNotReady(t *testing.T) {
+	fc := &fakeCache{}
+	w := newStartedWatcher(fc)
+	// Watch is registered (watching=true) but NOT active (active=false).
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetCRDExists(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "deactivated"))
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testCRDName,
+			DeletionTimestamp: &metav1.Time{},
+		},
+	}
+
+	dynamicwatch.SimulateCRDChange(w, t.Context(), crd)
+
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "deactivated"))
+
+	if counterAfter != counterBefore {
+		t.Errorf("expected deactivated counter NOT to increment when wasReady=false, got delta %v",
+			counterAfter-counterBefore)
+	}
+}
+
+func TestMetrics_Invalidated_GaugeAndCounter(t *testing.T) {
+	fc := &fakeCache{getErr: &cache.ErrResourceNotCached{}}
+	w := newStartedWatcher(fc)
+	dynamicwatch.SetActive(w, true)
+	dynamicwatch.SetCRDExists(w, true)
+
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "invalidated"))
+
+	_, _ = w.TryGet(t.Context(), client.ObjectKey{Name: "test"}, &corev1.ConfigMap{})
+
+	gaugeAfter := testutil.ToFloat64(dynamicwatch.WatcherActive.WithLabelValues(testCRDName))
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "invalidated"))
+
+	if gaugeAfter != 0 {
+		t.Errorf("expected gauge=0 after invalidation, got %v", gaugeAfter)
+	}
+
+	if counterAfter != counterBefore+1 {
+		t.Errorf("expected invalidated counter to increment by 1, got delta %v (before=%v, after=%v)",
+			counterAfter-counterBefore, counterBefore, counterAfter)
+	}
+}
+
+func TestMetrics_SyncFailed_Counter(t *testing.T) {
+	fc := &fakeCache{}
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	dynamicwatch.SetWatching(w, true)
+	dynamicwatch.SetRequeueAll(w, func(_ context.Context) []reconcile.Request { return nil })
+
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "sync_failed"))
+
+	src := &fakeSyncingSource{syncErr: context.DeadlineExceeded}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, dynamicwatch.Generation(w), src)
+
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "sync_failed"))
+
+	if counterAfter != counterBefore+1 {
+		t.Errorf("expected sync_failed counter to increment by 1, got delta %v (before=%v, after=%v)",
+			counterAfter-counterBefore, counterBefore, counterAfter)
+	}
+
+	// Gauge should remain at whatever it was (not set to 1).
+	gaugeAfter := testutil.ToFloat64(dynamicwatch.WatcherActive.WithLabelValues(testCRDName))
+	if gaugeAfter != 0 {
+		t.Errorf("expected gauge=0 after sync failure, got %v", gaugeAfter)
+	}
+}
+
+func TestMetrics_SyncFailed_StaleGeneration_NoCounter(t *testing.T) {
+	fc := &fakeCache{}
+	w := newTestWatcher(fc)
+	q := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[reconcile.Request](),
+	)
+	dynamicwatch.SetQueue(w, q)
+	dynamicwatch.SetWatching(w, true)
+
+	capturedGen := dynamicwatch.Generation(w)
+
+	// Advance generation to simulate CRD removal.
+	dynamicwatch.SetGeneration(w, capturedGen+1)
+
+	counterBefore := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "sync_failed"))
+
+	src := &fakeSyncingSource{syncErr: context.DeadlineExceeded}
+	syncCtx, syncCancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+
+	dynamicwatch.CallWaitForSyncAndRequeue(w, syncCtx, syncCancel, capturedGen, src)
+
+	counterAfter := testutil.ToFloat64(dynamicwatch.WatcherTransitions.WithLabelValues(testCRDName, "sync_failed"))
+
+	if counterAfter != counterBefore {
+		t.Errorf("expected sync_failed counter NOT to increment for stale generation, got delta %v",
+			counterAfter-counterBefore)
 	}
 }

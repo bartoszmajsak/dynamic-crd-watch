@@ -24,6 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
+// WatcherActive exports the gauge metric for testing.
+var WatcherActive = watcherActive
+
+// WatcherTransitions exports the counter metric for testing.
+var WatcherTransitions = watcherTransitions
+
 // NewTestWatcher creates a Watcher for unit testing without requiring a
 // ctrl.Manager. Sets started=true and stores the given ctx so Ensure()
 // works without calling Start().
