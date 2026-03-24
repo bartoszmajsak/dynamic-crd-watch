@@ -131,3 +131,66 @@ func TestIsCRDEstablished(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCRDName(t *testing.T) {
+	tests := []struct {
+		name    string
+		crdName string
+		wantErr bool
+	}{
+		{
+			name:    "valid name with group",
+			crdName: "pluginconfigs.demo.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid name with simple group",
+			crdName: "widgets.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid name with multiple dots in group",
+			crdName: "configs.apps.internal.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "empty string",
+			crdName: "",
+			wantErr: true,
+		},
+		{
+			name:    "bare plural without group",
+			crdName: "widgets",
+			wantErr: true,
+		},
+		{
+			name:    "trailing dot",
+			crdName: "widgets.",
+			wantErr: true,
+		},
+		{
+			name:    "leading dot",
+			crdName: ".example.com",
+			wantErr: true,
+		},
+		{
+			name:    "only dots",
+			crdName: "...",
+			wantErr: true,
+		},
+		{
+			name:    "single dot",
+			crdName: ".",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCRDName(tt.crdName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateCRDName(%q) error = %v, wantErr %v", tt.crdName, err, tt.wantErr)
+			}
+		})
+	}
+}

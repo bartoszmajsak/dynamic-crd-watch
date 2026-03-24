@@ -156,6 +156,57 @@ var _ = Describe("dynamicwatch.Build", func() {
 			dynamicwatch.For[*demov1alpha1.PluginConfig](nil, "pluginconfigs.demo.example.com")
 		}).To(PanicWith(ContainSubstring("nil manager")))
 	})
+
+	It("rejects invalid CRD name - empty string", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("crdName is required")))
+	})
+
+	It("rejects invalid CRD name - bare plural without group", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "widgets").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
+		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+	})
+
+	It("rejects invalid CRD name - trailing dot", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), "widgets.").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
+		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+	})
+
+	It("rejects invalid CRD name - leading dot", func() {
+		if deployedManager {
+			Skip("requires in-process manager")
+		}
+
+		_, err := dynamicwatch.For[*demov1alpha1.PluginConfig](newMgr(), ".example.com").
+			WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(noopObjectMapper)).
+			EnqueueOnCRDChange(noopRequeueAll).
+			Build()
+		Expect(err).To(MatchError(ContainSubstring("invalid CRD name")))
+		Expect(err).To(MatchError(ContainSubstring("expected format: <plural>.<group>")))
+	})
 })
 
 // acceptAllPluginConfigs is a properly typed predicate for use in WithPredicates tests.

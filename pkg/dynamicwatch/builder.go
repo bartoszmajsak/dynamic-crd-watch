@@ -140,11 +140,45 @@ func (b *WatcherBuilder[T]) EnqueueOnCRDChange(fn RequeueParentsFn) *WatcherBuil
 	return b
 }
 
+// validateCRDName checks if the CRD name is in the valid format <plural>.<group>.
+// A valid CRD name must contain at least one dot with non-empty parts on both sides.
+func validateCRDName(name string) error {
+	if name == "" {
+		return errors.New("dynamicwatch: crdName is required")
+	}
+
+	// Find the first dot to split plural and group.
+	dotIdx := -1
+	for i, c := range name {
+		if c == '.' {
+			dotIdx = i
+			break
+		}
+	}
+
+	// No dot found - bare plural without group.
+	if dotIdx == -1 {
+		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
+	}
+
+	// Leading dot - empty plural.
+	if dotIdx == 0 {
+		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
+	}
+
+	// Trailing dot - empty group.
+	if dotIdx == len(name)-1 {
+		return fmt.Errorf("dynamicwatch: invalid CRD name %q (expected format: <plural>.<group>)", name)
+	}
+
+	return nil
+}
+
 // Build creates the [Watcher]. Returns an error if required fields are
 // missing or if the GVK cannot be derived from the scheme.
 func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
-	if b.crdName == "" {
-		return nil, errors.New("dynamicwatch: crdName is required")
+	if err := validateCRDName(b.crdName); err != nil {
+		return nil, err
 	}
 
 	hasHandler := b.objHandler != nil
