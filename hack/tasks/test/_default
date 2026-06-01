@@ -2,5 +2,9 @@
 #MISE description="Run tests (embedded apiserver, in-process manager)"
 #MISE depends=["generate:*"]
 
-KUBEBUILDER_ASSETS="$(setup-envtest use 1.31.0 -p path)" \
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+SETUP_ENVTEST="${ROOT_DIR}/bin/setup-envtest"
+
+KUBEBUILDER_ASSETS="$("${SETUP_ENVTEST}" use 1.31.0 --bin-dir "${ROOT_DIR}/bin" -p path)" \
   go test ./... -coverprofile cover.out

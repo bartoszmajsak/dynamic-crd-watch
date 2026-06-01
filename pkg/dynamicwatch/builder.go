@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -21,6 +22,7 @@ import (
 type WatcherBuilder[T client.Object] struct {
 	mgr               ctrl.Manager
 	crdName           string
+	conditionType     string
 	crdCache          *CRDCache
 	objHandler        handler.TypedEventHandler[T, reconcile.Request]
 	ownerType         client.Object
@@ -172,6 +174,20 @@ func (b *WatcherBuilder[T]) WithEventRecorder(recorder record.EventRecorder) *Wa
 	return b
 }
 
+// WithConditionType overrides the auto-derived condition type name used by
+// [WatchHandle.Condition] and [Registry.Conditions]. Without this, the
+// condition type is derived from the CRD plural name (e.g.
+// "httproutes.gateway.networking.k8s.io" becomes "HTTPRoutesAvailable").
+func (b *WatcherBuilder[T]) WithConditionType(condType string) *WatcherBuilder[T] {
+	if condType == "" {
+		panic("dynamicwatch: WithConditionType called with empty string")
+	}
+
+	b.conditionType = condType
+
+	return b
+}
+
 // validateCRDName checks if the CRD name is in the valid format <plural>.<group>.
 // A valid CRD name must contain at least one dot with non-empty parts on both sides.
 func validateCRDName(name string) error {
@@ -277,17 +293,60 @@ func (b *WatcherBuilder[T]) Build() (*Watcher[T], error) {
 		syncTimeout = defaultSyncTimeout
 	}
 
+	condType := b.conditionType
+	if condType == "" {
+		condType = conditionTypeFromCRDName(b.crdName)
+	}
+
 	w := &Watcher[T]{
-		crdName:     b.crdName,
-		objCache:    objCache,
-		crdCache:    crdCache,
-		objHandler:  objHandler,
-		predicates:  b.predicates,
-		requeueAll:  b.requeueAll,
-		newT:        newT,
-		syncTimeout: syncTimeout,
-		recorder:    b.recorder,
+		crdName:       b.crdName,
+		conditionType: condType,
+		objCache:      objCache,
+		crdCache:      crdCache,
+		objHandler:    objHandler,
+		predicates:    b.predicates,
+		requeueAll:    b.requeueAll,
+		newT:          newT,
+		syncTimeout:   syncTimeout,
+		recorder:      b.recorder,
 	}
 
 	return w, nil
+}
+
+// RegisterOn builds the watcher, stores it in the [Registry], and attaches
+// it to the controller builder via [builder.Builder.WatchesRawSource].
+// The registry's shared [CRDCache] is used automatically - any previously
+// set CRDCache via [WatcherBuilder.WithCRDCache] is overridden.
+//
+// Returns a [WatchHandle] for type-safe access during reconciliation.
+//
+// Panics if reg or ctrlBuilder is nil.
+func (b *WatcherBuilder[T]) RegisterOn(reg *Registry, ctrlBuilder *builder.Builder) (WatchHandle[T], error) {
+	if reg == nil {
+		panic("dynamicwatch: RegisterOn called with nil Registry")
+	}
+
+	if ctrlBuilder == nil {
+		panic("dynamicwatch: RegisterOn called with nil Builder")
+	}
+
+	if reg.has(b.crdName) {
+		return WatchHandle[T]{}, fmt.Errorf("dynamicwatch: watcher for %s already registered", b.crdName)
+	}
+
+	b.crdCache = reg.crdCache
+
+	w, err := b.Build()
+	if err != nil {
+		return WatchHandle[T]{}, err
+	}
+
+	if err := reg.register(b.crdName, w); err != nil {
+		return WatchHandle[T]{}, err
+	}
+
+	ctrlBuilder.WatchesRawSource(w)
+
+	return WatchHandle[T]{w: w}, nil
 }

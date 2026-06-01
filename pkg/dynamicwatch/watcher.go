@@ -124,15 +124,16 @@ var _ source.SyncingSource = (*Watcher[client.Object])(nil)
 // It implements [source.SyncingSource] so it can be passed directly to
 // [builder.Builder.WatchesRawSource].
 type Watcher[T client.Object] struct {
-	crdName     string
-	objCache    cache.Cache
-	crdCache    cache.Cache
-	objHandler  handler.TypedEventHandler[T, reconcile.Request]
-	predicates  []predicate.TypedPredicate[T]
-	requeueAll  RequeueParentsFn
-	newT        func() T
-	syncTimeout time.Duration
-	recorder    record.EventRecorder
+	crdName       string
+	conditionType string
+	objCache      cache.Cache
+	crdCache      cache.Cache
+	objHandler    handler.TypedEventHandler[T, reconcile.Request]
+	predicates    []predicate.TypedPredicate[T]
+	requeueAll    RequeueParentsFn
+	newT          func() T
+	syncTimeout   time.Duration
+	recorder      record.EventRecorder
 
 	// ctx is the controller lifecycle context, set by Start.
 	ctx context.Context //nolint:containedctx // Intentional: goroutines spawned by Ensure need the lifecycle context.

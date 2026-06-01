@@ -40,10 +40,11 @@ func NewTestWatcher[T client.Object](
 	ctx context.Context,
 ) *Watcher[T] {
 	w := &Watcher[T]{
-		crdName:     crdName,
-		objCache:    c,
-		ctx:         ctx,
-		syncTimeout: defaultSyncTimeout,
+		crdName:       crdName,
+		conditionType: conditionTypeFromCRDName(crdName),
+		objCache:      c,
+		ctx:           ctx,
+		syncTimeout:   defaultSyncTimeout,
 		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ T) []reconcile.Request { return nil },
 		),
@@ -62,9 +63,10 @@ func NewUnstartedTestWatcher[T client.Object](
 	c cache.Cache,
 ) *Watcher[T] {
 	return &Watcher[T]{
-		crdName:     crdName,
-		objCache:    c,
-		syncTimeout: defaultSyncTimeout,
+		crdName:       crdName,
+		conditionType: conditionTypeFromCRDName(crdName),
+		objCache:      c,
+		syncTimeout:   defaultSyncTimeout,
 		objHandler: handler.TypedEnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ T) []reconcile.Request { return nil },
 		),
@@ -175,4 +177,35 @@ func SyncTimeout[T client.Object](w *Watcher[T]) time.Duration {
 // SetRecorder sets the event recorder on the watcher for testing.
 func SetRecorder[T client.Object](w *Watcher[T], recorder record.EventRecorder) {
 	w.recorder = recorder
+}
+
+// NewTestRegistry creates a Registry for unit testing without requiring a
+// ctrl.Manager. The registry has no shared CRDCache - watchers must be
+// inserted directly via [RegistryInsert].
+func NewTestRegistry() *Registry {
+	return &Registry{
+		watchers: make(map[string]any),
+	}
+}
+
+// RegistryInsert stores a watcher in the registry, bypassing Build().
+// WARNING: overwrites existing entries without error. Use RegistryRegister
+// to test duplicate detection.
+func RegistryInsert(r *Registry, crdName string, w any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.watchers[crdName] = w
+}
+
+// RegistryRegister calls the unexported register() method, which checks
+// for duplicate crdName before inserting.
+func RegistryRegister(r *Registry, crdName string, w any) error {
+	return r.register(crdName, w)
+}
+
+// NewTestHandle creates a WatchHandle wrapping the given watcher without
+// going through RegisterOn.
+func NewTestHandle[T client.Object](w *Watcher[T]) WatchHandle[T] {
+	return WatchHandle[T]{w: w}
 }

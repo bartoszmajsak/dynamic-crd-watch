@@ -33,26 +33,73 @@ Runtime - CRD removed:
 
 The package provides a generic `Watcher[T]` that handles one optional CRD's lifecycle. Need multiple optional CRDs? Create one watcher per CRD.
 
-### Setup
+There are two ways to wire watchers - **direct** (one struct field per watcher) and **registry** (one registry, typed handles). Pick whichever fits your controller.
 
-Wire the watcher in `SetupWithManager` using a fluent builder that mirrors controller-runtime's API:
+### Setup - direct watchers
+
+For controllers with 1-2 optional CRDs, store watchers directly on the reconciler:
 
 ```go
+type MyReconciler struct {
+    client.Client
+    optionalWatch *dynamicwatch.Watcher[*v1alpha1.OptionalResource]
+}
+
 func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-    // 1. Build the watcher - GVK is derived from the scheme automatically
     r.optionalWatch, err = dynamicwatch.For[*v1alpha1.OptionalResource](mgr, "optionalresources.example.com").
         WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.mapOptionalToParent)).
         EnqueueOnCRDChange(r.allAffectedParents).
         Build()
 
-    // 2. Wire it up - Watcher implements source.SyncingSource
     return ctrl.NewControllerManagedBy(mgr).
         For(&v1alpha1.MyResource{}).
-        Named("my-controller").
         WatchesRawSource(r.optionalWatch).
         Complete(r)
 }
 ```
+
+### Setup - registry with handles
+
+For controllers with many optional CRDs, a `Registry` owns the shared CRD cache and `RegisterOn` returns typed `WatchHandle` values that go straight to the watcher on every call - no map lookup, no lock on the hot path:
+
+```go
+type MyReconciler struct {
+    client.Client
+    httpRouteWatch dynamicwatch.WatchHandle[*gwapiv1.HTTPRoute]
+    lwsWatch       dynamicwatch.WatchHandle[*lwsapi.LeaderWorkerSet]
+    kedaWatch      dynamicwatch.WatchHandle[*kedav1alpha1.ScaledObject]
+}
+
+func (r *MyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    reg, err := dynamicwatch.NewRegistry(mgr)
+    if err != nil {
+        return err
+    }
+
+    b := ctrl.NewControllerManagedBy(mgr).
+        For(&v1alpha1.MyResource{})
+
+    r.httpRouteWatch, err = dynamicwatch.For[*gwapiv1.HTTPRoute](mgr, "httproutes.gateway.networking.k8s.io").
+        WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.mapRouteToParent)).
+        EnqueueOnCRDChange(r.allAffectedParents).
+        RegisterOn(reg, b)
+    if err != nil {
+        return err
+    }
+
+    r.lwsWatch, err = dynamicwatch.For[*lwsapi.LeaderWorkerSet](mgr, "leaderworkersets.leaderworkerset.x-k8s.io").
+        EnqueueForOwner(&v1alpha1.MyResource{}).
+        EnqueueOnCRDChange(r.allAffectedParents).
+        RegisterOn(reg, b)
+    if err != nil {
+        return err
+    }
+
+    return b.Complete(r)
+}
+```
+
+`RegisterOn` does three things: builds the watcher (using the registry's shared CRD cache), stores it in the registry for bulk operations, and calls `WatchesRawSource` on the builder. The returned `WatchHandle` is a value type - cheap to copy, safe to store as a struct field.
 
 The two callbacks answer different questions:
 
@@ -106,36 +153,43 @@ The Watcher implements `source.SyncingSource`, so it plugs directly into the bui
 
 The builder also supports a few optional knobs:
 
+- `WithConditionType(name)` - override the auto-derived condition type name (see [Conditions](#conditions))
 - `WithSyncTimeout(d)` - how long to wait for the informer to sync before tearing down and retrying (default: 30s)
 - `WithEventRecorder(recorder)` - emit Kubernetes events on watch lifecycle transitions (activated, deactivated, sync failed)
 - `WithNamespaces(...)` - restrict the private object cache to specific namespaces (important for namespace-scoped RBAC)
-- `WithCRDCache(...)` - share a single CRD informer across multiple watchers
+- `WithCRDCache(...)` - share a single CRD informer across multiple watchers (automatic when using `RegisterOn`)
 
 ### Reconcile loop
 
-In your `Reconcile` method, use `TryGet` to check CRD availability and read the object in one call:
+In your `Reconcile` method, use `TryGet` to check CRD availability and read the object in one call. The API is identical for direct watchers and handles:
 
 ```go
-func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-    // ...
+// Direct watcher:
+available, err := r.optionalWatch.TryGet(ctx, key, optional)
 
-    optional := &v1alpha1.OptionalResource{}
-    available, err := r.optionalWatch.TryGet(ctx, key, optional)
-    if err != nil {
-        if client.IgnoreNotFound(err) == nil {
-            return ctrl.Result{}, r.setNotFoundCondition(ctx, obj)
-        }
-        return ctrl.Result{}, err
-    }
-    if !available {
-        // CRD not installed or informer still syncing.
-        // The watcher will requeue affected objects automatically
-        // once the cache is ready.
-        return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
-    }
+// Handle (from registry):
+available, err := r.httpRouteWatch.TryGet(ctx, key, route)
+```
 
-    // Use optional...
+The three-way return:
+
+```go
+optional := &v1alpha1.OptionalResource{}
+available, err := r.optionalWatch.TryGet(ctx, key, optional)
+if err != nil {
+    if client.IgnoreNotFound(err) == nil {
+        return ctrl.Result{}, r.setNotFoundCondition(ctx, obj)
+    }
+    return ctrl.Result{}, err
 }
+if !available {
+    // CRD not installed or informer still syncing.
+    // The watcher will requeue affected objects automatically
+    // once the cache is ready.
+    return ctrl.Result{}, r.setUnavailableCondition(ctx, obj)
+}
+
+// Use optional...
 ```
 
 `TryGet` calls `Ensure` internally and absorbs cache invalidation races - you never need to handle them yourself. The return values are:
@@ -146,9 +200,40 @@ func (r *MyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 
 There's also `TryList` with the same semantics for listing objects.
 
+### Conditions
+
+Every watcher can produce a `metav1.Condition` reflecting its current state - ready to set on your CR's status:
+
+```go
+// Individual - through a watcher or handle
+c := r.optionalWatch.Condition()
+// c.Type = "OptionalresourcesAvailable" (auto-derived from CRD name)
+// c.Status = "True" | "False"
+// c.Reason = "Ready" | "CRDNotFound" | "Syncing" | "Pending"
+meta.SetStatusCondition(&obj.Status.Conditions, c)
+```
+
+The condition type is auto-derived from the CRD plural name (e.g. `httproutes` -> `HTTPRoutesAvailable`). Known abbreviations (`http`, `grpc`, `tls`, `dns`, `api`) are uppercased automatically. For compound words where the auto-name is ugly, override it:
+
+```go
+dynamicwatch.For[*lwsapi.LeaderWorkerSet](mgr, "leaderworkersets.leaderworkerset.x-k8s.io").
+    WithConditionType("LeaderWorkerSetAvailable").
+    // ...
+```
+
+When using a registry, you can get conditions for all watchers at once:
+
+```go
+for _, c := range reg.Conditions() {
+    meta.SetStatusCondition(&obj.Status.Conditions, c)
+}
+```
+
 ### Observability
 
-The watcher exposes its state through three channels:
+The watcher exposes its state through four channels:
+
+**`Condition()`** returns a `metav1.Condition` - see the [Conditions](#conditions) section above.
 
 **`Status()`** returns a `WatcherStatus` with `Available` and `Reason` fields. Useful for health checks or debug endpoints without parsing logs:
 

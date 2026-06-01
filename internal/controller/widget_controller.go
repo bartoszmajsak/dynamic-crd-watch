@@ -30,12 +30,22 @@ const (
 )
 
 // WidgetReconciler reconciles a Widget object.
+//
+// Two setup patterns are supported - see SetupWithManager (direct watchers)
+// and SetupWithManagerUsingRegistry (registry + handles). Both produce
+// identical runtime behavior; the registry version reduces struct fields
+// for controllers with many optional CRDs.
 type WidgetReconciler struct {
 	client.Client
 
 	Scheme      *runtime.Scheme
 	pluginWatch *dynamicwatch.Watcher[*demov1alpha1.PluginConfig]
 	themeWatch  *dynamicwatch.Watcher[*demov1alpha1.Theme]
+
+	// Alternative: registry-based handles (used by SetupWithManagerUsingRegistry).
+	pluginHandle dynamicwatch.WatchHandle[*demov1alpha1.PluginConfig]
+	themeHandle  dynamicwatch.WatchHandle[*demov1alpha1.Theme]
+	useRegistry  bool
 }
 
 // +kubebuilder:rbac:groups=demo.example.com,resources=widgets,verbs=get;list;watch
@@ -84,7 +94,7 @@ func (r *WidgetReconciler) reconcilePlugin(ctx context.Context, widget *demov1al
 	plugin := &demov1alpha1.PluginConfig{}
 	pluginKey := client.ObjectKey{Name: widget.Spec.PluginRef, Namespace: widget.Namespace}
 
-	available, err := r.pluginWatch.TryGet(ctx, pluginKey, plugin)
+	available, err := r.tryGetPlugin(ctx, pluginKey, plugin)
 	if err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced PluginConfig not found", "pluginRef", widget.Spec.PluginRef)
@@ -121,7 +131,7 @@ func (r *WidgetReconciler) reconcileTheme(ctx context.Context, widget *demov1alp
 	theme := &demov1alpha1.Theme{}
 	themeKey := client.ObjectKey{Name: widget.Spec.ThemeRef, Namespace: widget.Namespace}
 
-	available, err := r.themeWatch.TryGet(ctx, themeKey, theme)
+	available, err := r.tryGetTheme(ctx, themeKey, theme)
 	if err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			log.Info("Referenced Theme not found", "themeRef", widget.Spec.ThemeRef)
@@ -347,4 +357,114 @@ func (r *WidgetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WatchesRawSource(r.pluginWatch).
 		WatchesRawSource(r.themeWatch).
 		Complete(r)
+}
+
+// SetupWithManagerUsingRegistry is an alternative setup that uses a
+// Registry to manage watchers, returning WatchHandle values instead of
+// storing *Watcher pointers directly. This pattern is better suited for
+// controllers with many optional CRDs (e.g. 10+), where individual
+// watcher fields would clutter the reconciler struct.
+func (r *WidgetReconciler) SetupWithManagerUsingRegistry(mgr ctrl.Manager) error {
+	r.useRegistry = true
+
+	reg, err := dynamicwatch.NewRegistry(mgr)
+	if err != nil {
+		return fmt.Errorf("creating watch registry: %w", err)
+	}
+
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&demov1alpha1.Widget{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		Named("widget")
+
+	r.pluginHandle, err = dynamicwatch.For[*demov1alpha1.PluginConfig](mgr, pluginConfigCRDName).
+		WithConditionType("PluginConfigAvailable").
+		WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.pluginConfigToWidgets)).
+		EnqueueOnCRDChange(r.allWidgetsWithPluginRef).
+		RegisterOn(reg, b)
+	if err != nil {
+		return fmt.Errorf("registering plugin watch: %w", err)
+	}
+
+	r.themeHandle, err = dynamicwatch.For[*demov1alpha1.Theme](mgr, themeCRDName).
+		WithConditionType("ThemeAvailable").
+		WithEventHandler(handler.TypedEnqueueRequestsFromMapFunc(r.themeToWidgets)).
+		EnqueueOnCRDChange(r.allWidgetsWithThemeRef).
+		RegisterOn(reg, b)
+	if err != nil {
+		return fmt.Errorf("registering theme watch: %w", err)
+	}
+
+	if err := r.setupFieldIndexes(mgr); err != nil {
+		return err
+	}
+
+	return b.Complete(r)
+}
+
+func (r *WidgetReconciler) tryGetPlugin(ctx context.Context, key client.ObjectKey, obj *demov1alpha1.PluginConfig) (bool, error) {
+	if r.useRegistry {
+		return r.pluginHandle.TryGet(ctx, key, obj)
+	}
+
+	return r.pluginWatch.TryGet(ctx, key, obj)
+}
+
+func (r *WidgetReconciler) tryGetTheme(ctx context.Context, key client.ObjectKey, obj *demov1alpha1.Theme) (bool, error) {
+	if r.useRegistry {
+		return r.themeHandle.TryGet(ctx, key, obj)
+	}
+
+	return r.themeWatch.TryGet(ctx, key, obj)
+}
+
+func (r *WidgetReconciler) setupFieldIndexes(mgr ctrl.Manager) error {
+	indexer := mgr.GetFieldIndexer()
+
+	indexes := []struct {
+		field   string
+		extract func(*demov1alpha1.Widget) []string
+	}{
+		{pluginRefField, func(w *demov1alpha1.Widget) []string {
+			if w.Spec.PluginRef == "" {
+				return nil
+			}
+			return []string{w.Spec.PluginRef}
+		}},
+		{themeRefField, func(w *demov1alpha1.Widget) []string {
+			if w.Spec.ThemeRef == "" {
+				return nil
+			}
+			return []string{w.Spec.ThemeRef}
+		}},
+		{hasPluginRefField, func(w *demov1alpha1.Widget) []string {
+			if w.Spec.PluginRef == "" {
+				return nil
+			}
+			return []string{"true"}
+		}},
+		{hasThemeRefField, func(w *demov1alpha1.Widget) []string {
+			if w.Spec.ThemeRef == "" {
+				return nil
+			}
+			return []string{"true"}
+		}},
+	}
+
+	for _, idx := range indexes {
+		extract := idx.extract
+		if err := indexer.IndexField(context.Background(), &demov1alpha1.Widget{}, idx.field,
+			func(obj client.Object) []string {
+				w, ok := obj.(*demov1alpha1.Widget)
+				if !ok {
+					return nil
+				}
+				return extract(w)
+			},
+		); err != nil {
+			return fmt.Errorf("indexing %s: %w", idx.field, err)
+		}
+	}
+
+	return nil
 }
